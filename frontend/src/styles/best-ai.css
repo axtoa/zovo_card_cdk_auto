@@ -1,0 +1,195 @@
+/* Best AI：对齐 sub2api/features/shop/shop.css 的 .cdk-public-shop。
+   所有规则限定在此皮肤内，复用原有页面、表单及主题切换机制。 */
+html[data-skin='best-ai'] {
+  --bg: #fbf4ec;
+  --bg-tint: none;
+  --surface: #fffcf7;
+  --surface-solid: var(--surface);
+  --surface-2: #f6e6d6;
+  --brd: #e9d5c1;
+  --brd-2: #d6b79d;
+  --ink: #623d2b;
+  --ink-2: #896b58;
+  --ink-3: #896b58;
+  --primary: #935137;
+  --primary-hover: #7b4128;
+  --primary-active: #623d2b;
+  --primary-soft: var(--surface-2);
+  --primary-on: #fff;
+  --good: #315238;
+  --good-soft: #e5eed9;
+  --err: #a23732;
+  --err-soft: #fff0ed;
+  --warn: #8c5a18;
+  --warn-soft: #f7eacb;
+  --info: #426478;
+  --info-soft: #e7eff2;
+  --shadow: none;
+  --shadow-sm: none;
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-display: var(--font-sans);
+  --font-serif: var(--font-sans);
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius-sm: 5px;
+  --radius-md: 5px;
+  --radius-lg: 12px;
+  --radius-pill: 5px;
+  --content-max: 1328px;
+  --nav-height: 64px;
+  --page-pad: 28px 24px 48px;
+
+  --btn-radius: 5px;
+  --btn-weight: 600;
+  --btn-track: 0;
+  --btn-color: #9b5534;
+  --btn-color-hover: #7b4128;
+  --btn-fg: #fff;
+  --btn-img: none;
+  --btn-border: 1px solid transparent;
+  --btn-shadow: none;
+  --btn-hover-move: none;
+  --btn-active-move: none;
+  --btn2-bg: var(--surface);
+  --btn2-fg: var(--primary);
+  --btn2-border: 1px solid var(--brd);
+  --card-bg: var(--surface);
+  --card-border: 1px solid var(--brd);
+  --card-radius: 12px;
+  --card-shadow: none;
+  --input-bg: var(--surface);
+  --input-border: 1px solid var(--brd);
+  --input-radius: 5px;
+  --input-focus-shadow: 0 0 0 2px var(--primary-soft);
+  --tabs-bg: transparent;
+  --tabs-border: 0;
+  --tabs-radius: 0;
+  --tab-radius: 0;
+  --tab-active-bg: transparent;
+  --tab-active-fg: var(--primary);
+  --tab-active-shadow: inset 0 -2px 0 var(--primary);
+  --title-font: var(--font-sans);
+  --title-size: 30px;
+  --title-weight: 700;
+  --title-track: 0;
+  --hero-align: left;
+  --hero-justify: flex-start;
+  --eyebrow-bg: transparent;
+  --eyebrow-border: 0;
+  --eyebrow-fg: var(--primary);
+  --eyebrow-track: 1px;
+  --badge-radius: 5px;
+  --badge-bg: var(--surface);
+  --dot-border-w: 1px;
+  --dot-current-bg: var(--surface-2);
+  --dot-current-fg: var(--primary);
+  --dot-current-shadow: none;
+
+  --el-fill-color: var(--surface-2);
+  --el-fill-color-light: var(--surface-2);
+  --el-fill-color-lighter: var(--bg);
+  --el-fill-color-extra-light: var(--bg);
+  --el-fill-color-dark: var(--brd);
+  --el-fill-color-darker: var(--brd-2);
+  --el-fill-color-disabled: var(--surface-2);
+  --el-disabled-bg-color: var(--surface-2);
+  --el-disabled-text-color: var(--ink-3);
+  --el-disabled-border-color: var(--brd);
+  --el-text-color-placeholder: var(--ink-3);
+  --el-border-color-extra-light: var(--brd);
+  --el-border-color-dark: var(--brd-2);
+  --el-border-color-darker: var(--brd-2);
+  --el-box-shadow: none;
+  --el-box-shadow-light: none;
+  --el-box-shadow-lighter: none;
+}
+
+html.dark[data-skin='best-ai'] {
+  --bg: #241d18;
+  --surface: #30251f;
+  --surface-2: #483325;
+  --brd: #594133;
+  --brd-2: #896b58;
+  --ink: #f4e4d5;
+  --ink-2: #c8ac96;
+  --ink-3: #c8ac96;
+  --primary: #e3b594;
+  --primary-hover: #f4e4d5;
+  --primary-active: #c8ac96;
+  --primary-on: #241d18;
+  --good: #d8edc2;
+  --good-soft: #30472f;
+  --err: #ffb3a7;
+  --err-soft: #3d2523;
+  --warn: #edcc8d;
+  --warn-soft: #44351f;
+  --info: #b8d6e5;
+  --info-soft: #273b45;
+}
+
+html[data-skin='best-ai'] body { font-size: 14px; line-height: 1.7; }
+html[data-skin='best-ai'] :is(h1, h2, h3, h4, .page-title) { letter-spacing: 0; }
+html[data-skin='best-ai'] .u-topbar {
+  max-width: none;
+  min-height: 64px;
+  padding: 0 max(24px, calc((100vw - 1280px) / 2));
+  background: var(--surface);
+  border-bottom: 1px solid var(--brd);
+}
+html[data-skin='best-ai'] .u-hero {
+  max-width: 72rem;
+  margin: 28px auto 24px;
+}
+html[data-skin='best-ai'] .u-page:has(.u-main.max-w-3xl) .u-hero { max-width: 48rem; }
+html[data-skin='best-ai'] .u-page:has(.u-main.max-w-4xl) .u-hero { max-width: 56rem; }
+html[data-skin='best-ai'] .u-page:has(.u-main.max-w-5xl) .u-hero { max-width: 64rem; }
+html[data-skin='best-ai'] .u-eyebrow { padding: 0; font-weight: 400; }
+html[data-skin='best-ai'] .u-eyebrow i { display: none; }
+html[data-skin='best-ai'] .u-title { margin-top: 10px; line-height: 1.3; }
+html[data-skin='best-ai'] .u-sub { max-width: none; margin: 10px 0 0; font-size: 14px; }
+html[data-skin='best-ai'] .u-badges { margin-top: 16px; }
+html[data-skin='best-ai'] .u-main > .card:not(.redeem-tabs) { padding: 24px; }
+html[data-skin='best-ai'] .svc-card { padding: 18px; border-radius: 8px; }
+html[data-skin='best-ai'] .svc-card h3 { font-size: 19px; font-weight: 650; }
+html[data-skin='best-ai'] .u-main h2 { font-size: 19px; font-weight: 650; }
+html[data-skin='best-ai'] :is(.btn-primary, .btn-secondary, .btn-danger) {
+  min-height: 40px;
+  padding: 9px 16px;
+  font-size: 13px;
+}
+html[data-skin='best-ai'] .input { padding: 10px 12px; }
+html[data-skin='best-ai'] .redeem-tabs.card { border-bottom: 1px solid var(--brd); padding: 0; }
+html[data-skin='best-ai'] .redeem-tab { padding: 12px 8px; }
+html[data-skin='best-ai'] .sp-item.active {
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+html[data-skin='best-ai'] .sp-mode-btns button { border-radius: 5px; }
+html[data-skin='best-ai'] .topnav { background: var(--surface); backdrop-filter: none; }
+html[data-skin='best-ai'] .nav-pills .pill { border: 0; border-radius: 0; background: transparent; }
+html[data-skin='best-ai'] .nav-pills .pill.active {
+  background: transparent;
+  box-shadow: inset 0 -2px 0 var(--primary);
+}
+html[data-skin='best-ai'] :is(.el-input__wrapper, .el-textarea__inner, .el-select__wrapper) {
+  background: var(--surface) !important;
+}
+html[data-skin='best-ai'] :is(.el-input__wrapper, .el-select__wrapper).is-focus {
+  box-shadow: 0 0 0 1px var(--primary) inset !important;
+}
+html[data-skin='best-ai'] .el-textarea__inner:focus {
+  box-shadow: 0 0 0 1px var(--primary) inset !important;
+}
+html[data-skin='best-ai'] .el-button--primary:not(.is-plain):not(.is-text):not(.is-link):not(.is-disabled) {
+  --el-button-hover-bg-color: #7b4128;
+  --el-button-hover-border-color: #7b4128;
+  --el-button-active-bg-color: #623d2b;
+  --el-button-active-border-color: #623d2b;
+}
+
+@media (max-width: 640px) {
+  html[data-skin='best-ai'] .u-topbar { padding: 0 18px; }
+  html[data-skin='best-ai'] .u-hero { margin-top: 24px; padding: 0 18px; }
+  html[data-skin='best-ai'] .u-main { padding: 0 18px; }
+  html[data-skin='best-ai'] .u-title { font-size: 25px; }
+  html[data-skin='best-ai'] .u-main > .card:not(.redeem-tabs) { padding: 20px; }
+}

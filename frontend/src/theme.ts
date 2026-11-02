@@ -4,6 +4,7 @@ import { ref, computed } from 'vue'
 export type ThemeMode = 'light' | 'dark' | 'auto'
 export type SkinId =
   | 'zovo'
+  | 'best-ai'
   | 'terracotta'
   | 'ember'
   | 'ocean'
@@ -53,6 +54,23 @@ const MONO_FONT = 'JetBrains+Mono:wght@400;500;600'
 const SERIF_SC = 'Noto+Serif+SC:wght@500;600;700'
 
 export const SKINS: SkinMeta[] = [
+  {
+    id: 'best-ai',
+    label: 'Best AI',
+    labelEn: 'Best AI',
+    swatch: '#9b5534',
+    swatch2: '#fbf4ec',
+    blurb: '商城同款 · 奶油棕 / 深棕 · 简洁细描边',
+    heading: 'sans',
+    density: 'comfy',
+    nav: 'underline',
+    layout: 'top',
+    primary: '#e3b594',
+    primaryOn: '#241d18',
+    primaryLight: '#935137',
+    primaryOnLight: '#ffffff',
+    fonts: [],
+  },
   {
     // 与卡台新版 UI 同一套设计语言：夜间=曜夜（深黑 + 雾金），日间=流金（象牙 + 暗金）
     id: 'zovo',
@@ -343,6 +361,8 @@ function applySkin() {
 // 不阻塞首屏：字体到了再换（display=swap），没到之前用系统字体。
 const loadedFontHref = new Set<string>()
 function ensureSkinFonts(meta: SkinMeta) {
+  // 系统字体皮肤无需访问 Google Fonts。
+  if (!meta.fonts.length) return
   const families = [...meta.fonts, MONO_FONT].map((f) => `family=${f}`).join('&')
   const href = `https://fonts.googleapis.com/css2?${families}&display=swap`
   if (loadedFontHref.has(href) || document.querySelector(`link[data-skin-fonts="${meta.id}"]`)) {

@@ -104,6 +104,7 @@ func AdminPutSettings(c *gin.Context) {
 	}
 
 	allowedSkins := map[string]bool{
+		"best-ai": true,
 		"zovo": true, "terracotta": true, "ocean": true, "cyber": true, "forest": true, "violet": true,
 		"slate": true, "rose": true, "ember": true, "noir": true, "paper": true,
 	}
