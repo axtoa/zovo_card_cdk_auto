@@ -2,7 +2,7 @@
 FROM node:20-alpine AS frontend
 WORKDIR /src/frontend
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci --no-audit --no-fund
+RUN npm ci --legacy-peer-deps --no-audit --no-fund
 COPY frontend/ ./
 RUN npm run build
 
@@ -12,7 +12,8 @@ WORKDIR /src/backend
 COPY backend/go.mod backend/go.sum ./
 RUN go mod download
 COPY backend/ ./
-RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/cdk-recharge ./cmd/server
+ARG APP_VERSION=""
+RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/tuzi/cdk-recharge-system/internal/handler.BuildVersion=${APP_VERSION}" -o /out/cdk-recharge ./cmd/server
 
 # ===== Stage 3: runtime =====
 FROM debian:bookworm-slim

@@ -1,0 +1,60 @@
+name: zovocdk
+
+services:
+  cdk:
+    image: ${APP_IMAGE:-ghcr.io/axtoa/zovo_card_cdk_auto:latest}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: "8080"
+      SERVER_MODE: release
+      DB_PATH: /app/data/cdk_recharge.db
+      WEB_DIR: /app/web
+      INSTALL_MODE: wizard
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env before starting}
+      UPDATE_ENABLED: "0"
+      CDK_GITHUB_REPO: axtoa/zovo_card_cdk_auto
+      TRUSTED_PROXIES: 172.16.0.0/12,192.168.0.0/16,10.0.0.0/8
+      GOMAXPROCS: "2"
+      GOMEMLIMIT: 192MiB
+    volumes:
+      - ./data:/app/data
+    mem_limit: 256m
+    memswap_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:8080/health]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN:?Set SITE_DOMAIN in .env before starting}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/data:/data
+      - ./caddy/config:/config
+    mem_limit: 128m
+    memswap_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    depends_on:
+      cdk:
+        condition: service_healthy
