@@ -37,7 +37,7 @@ const (
 func PublicSiteConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"installed":  db.IsInstalled(),
-		"brand_name": settingOr("brand_name", "Recharge Portal"),
+		"brand_name": settingOr("brand_name", "Best AI"),
 		"brand_sub":  settingOr("brand_sub", "Account Upgrade Service"),
 		"skin":       settingOr("skin", defaultSiteSkin),
 		"theme_mode": settingOr("theme_mode", defaultThemeMode),
@@ -47,7 +47,7 @@ func PublicSiteConfig(c *gin.Context) {
 // AdminGetSettings GET /api/v1/admin/settings
 func AdminGetSettings(c *gin.Context) {
 	out := gin.H{
-		"brand_name": settingOr("brand_name", "Recharge Portal"),
+		"brand_name": settingOr("brand_name", "Best AI"),
 		"brand_sub":  settingOr("brand_sub", "Account Upgrade Service"),
 		"skin":       settingOr("skin", defaultSiteSkin),
 		"theme_mode": settingOr("theme_mode", defaultThemeMode),

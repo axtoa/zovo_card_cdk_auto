@@ -3,13 +3,7 @@
        结构各皮肤共用，外观由 styles/skins.css 按 data-skin 决定。 -->
   <header class="u-topbar">
     <router-link to="/" class="u-brand" :aria-label="t('common.backHome')">
-      <span class="u-logo" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12l4 6-10 12L2 9z" /><path d="M11 3 8 9l4 12 4-12-3-6" /><path d="M2 9h20" /></svg>
-      </span>
-      <span class="u-brand-text">
-        <strong>{{ brand.name || t('home.brand') }}</strong>
-        <small>{{ brand.sub || t('home.brandSub') }}</small>
-      </span>
+      <SiteBrand />
     </router-link>
     <div class="u-tools">
       <LanguageToggle />
@@ -35,7 +29,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import LanguageToggle from './LanguageToggle.vue'
 import ThemeToggle from './ThemeToggle.vue'
-import { siteBrand } from '../theme'
+import SiteBrand from './SiteBrand.vue'
 
 withDefaults(defineProps<{
   title: string
@@ -46,6 +40,5 @@ withDefaults(defineProps<{
 }>(), { subtitle: '', eyebrow: '', badges: false, compact: false })
 
 const { t } = useI18n({ useScope: 'global' })
-const brand = siteBrand
 const badgeList = computed(() => [t('hero.badgeOfficial'), t('hero.badgeSelf'), t('hero.badgeTrack')])
 </script>

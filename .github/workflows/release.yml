@@ -47,7 +47,7 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         run: |
-          npm ci
+          npm ci --legacy-peer-deps --no-audit --no-fund
           npm run build
           mkdir -p ../dist/web
           cp -a dist/. ../dist/web/

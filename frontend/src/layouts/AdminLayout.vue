@@ -3,8 +3,7 @@
     <!-- 侧栏 / 细轨（cyber、slate 等） -->
     <aside v-if="layout === 'sidebar' || layout === 'rail'" class="sidenav">
       <div class="side-brand" @click="router.push('/ops')">
-        <span class="brand-icon">{{ layout === 'cyber' || skin === 'cyber' ? '◈' : '🚀' }}</span>
-        <span v-if="layout !== 'rail'" class="brand-text">{{ brand.name || '运营控制台' }}</span>
+        <SiteBrand :compact="layout === 'rail'" />
       </div>
       <nav class="side-pills">
         <router-link
@@ -39,8 +38,7 @@
       <header v-if="layout === 'top'" class="topnav">
         <div class="nav-inner">
           <div class="brand" @click="router.push('/ops')">
-            <span class="brand-icon">🚀</span>
-            <span class="brand-text">{{ brand.name || '运营控制台' }}</span>
+            <SiteBrand />
           </div>
           <nav class="nav-pills">
             <router-link
@@ -85,14 +83,14 @@ import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { serverLogout } from '../lib/api'
-import { siteBrand, currentSkinMeta, siteSkin } from '../theme'
+import { siteBrand, currentSkinMeta } from '../theme'
 import SkinPicker from '../components/SkinPicker.vue'
+import SiteBrand from '../components/SiteBrand.vue'
 
 const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const brand = siteBrand
-const skin = siteSkin
 
 const layout = computed(() => currentSkinMeta.value.layout)
 const nav = computed(() => currentSkinMeta.value.nav)
