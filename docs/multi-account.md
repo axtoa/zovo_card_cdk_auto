@@ -37,7 +37,7 @@
 - 修改前版本：`v1.4.36`
 - 基线提交：`21932868929fd477aa69a1d057f1cef486f14d35`
 - 额外保护标签：`rollback/pre-multi-account-20261106`
-- 本次功能提交保存在 `codex/multi-account` 分支；正式镜像发布另行进行。
+- 功能开发分支：`codex/multi-account`；正式发布版本：`v1.4.37`，镜像 `ghcr.io/axtoa/zovo_card_cdk_auto:1.4.37`。
 
 需要查看旧代码时，可在工作区干净的情况下执行：
 
