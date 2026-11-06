@@ -162,7 +162,8 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { authFetch } from '../../lib/api'
+import { useAccountFetch } from '../../lib/cardAccounts'
+const { authFetch, accountId } = useAccountFetch()
 
 const stats = ref<any>({})
 const statsError = ref('')

@@ -158,7 +158,8 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { authFetch } from '../../lib/api'
+import { useAccountFetch } from '../../lib/cardAccounts'
+const { authFetch, accountId } = useAccountFetch()
 import { dialog } from '../../lib/dialog'
 
 const rows = ref<any[]>([])

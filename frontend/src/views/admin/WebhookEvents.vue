@@ -20,30 +20,10 @@
           </el-input>
           <div class="text-xs text-subtle mt-1">填到卡台「开发者」页的回调地址（须 https）</div>
         </el-form-item>
-        <el-form-item label="Webhook Secret">
-          <el-input
-            v-model="secretInput"
-            type="password"
-            show-password
-            :placeholder="secretHint"
-          />
-          <div class="text-xs text-subtle mt-1">
-            卡台首次保存回调地址后生成的 <code>whsec_…</code>；本站用其校验 <code>X-Signature</code>
-          </div>
-        </el-form-item>
-        <el-form-item>
-          <el-button type="primary" :loading="saving" @click="saveSecret">保存 Secret</el-button>
-          <el-button :loading="loading" @click="load">刷新事件</el-button>
-        </el-form-item>
+        <el-form-item label="各账号密钥"><router-link to="/ops/integration" class="btn-secondary">前往卡台接入管理</router-link></el-form-item>
+        <el-form-item><el-button :loading="loading" @click="load">刷新事件</el-button></el-form-item>
       </el-form>
-      <el-alert
-        v-if="!secretSet"
-        type="warning"
-        :closable="false"
-        show-icon
-        title="尚未配置 webhook_secret：卡台回调会被 503/401 拒绝"
-        class="mt-2"
-      />
+      <p class="text-sm text-muted">所有账号共用此地址，使用各自的密钥验签。下方标明每条事件所属账号。</p>
     </el-card>
 
     <el-card shadow="never" header="最近事件">
@@ -52,7 +32,7 @@
         <thead>
           <tr>
             <th>ID</th>
-            <th>类型</th>
+            <th>账号</th><th>类型</th>
             <th>幂等键</th>
             <th>时间</th>
             <th>摘要</th>
@@ -60,14 +40,14 @@
         </thead>
         <tbody>
           <tr v-if="loading">
-            <td colspan="5" class="py-6 text-center text-muted">加载中…</td>
+            <td colspan="6" class="py-6 text-center text-muted">加载中…</td>
           </tr>
           <tr v-else-if="!events.length">
-            <td colspan="5" class="py-6 text-center text-muted">暂无回调（先配 URL + secret，或继续用轮询）</td>
+            <td colspan="6" class="py-6 text-center text-muted">暂无回调（先配 URL + secret，或继续用轮询）</td>
           </tr>
           <tr v-for="e in events" :key="e.id">
             <td class="mono">{{ e.id }}</td>
-            <td>{{ e.event_type }}</td>
+            <td>{{ accounts.find(a => a.id === e.account_id)?.name || `#${e.account_id}` }}</td><td>{{ e.event_type }}</td>
             <td class="mono text-xs">{{ e.idem_key }}</td>
             <td class="text-sm text-muted">{{ e.created_at }}</td>
             <td class="text-xs text-subtle">{{ summarize(e.payload) }}</td>
@@ -83,13 +63,10 @@ import { onMounted, ref } from 'vue'
 import { authFetch } from '../../lib/api'
 import { dialog } from '../../lib/dialog'
 
-const webhookUrl = ref('https://gptcdk.ai/api/v1/webhooks/cardplatform')
-const secretSet = ref(false)
-const secretHint = ref('未配置')
-const secretInput = ref('')
+const webhookUrl = ref(`${location.origin}/api/v1/webhooks/cardplatform`)
+const accounts = ref<any[]>([])
 const events = ref<any[]>([])
 const loading = ref(false)
-const saving = ref(false)
 const error = ref('')
 
 function summarize(p: any) {
@@ -117,35 +94,9 @@ async function load() {
       return
     }
     if (d.webhook_url) webhookUrl.value = d.webhook_url
-    secretSet.value = !!d.webhook_secret_set
-    secretHint.value = d.webhook_secret_set ? `已配置 ${d.webhook_secret_hint || ''}` : '未配置'
     events.value = d.events || []
   } finally {
     loading.value = false
-  }
-}
-
-async function saveSecret() {
-  if (!secretInput.value.trim()) {
-    dialog.toast('请填写 secret', 'err')
-    return
-  }
-  saving.value = true
-  try {
-    const r = await authFetch('/api/v1/admin/settings', {
-      method: 'PUT',
-      body: JSON.stringify({ webhook_secret: secretInput.value.trim() }),
-    })
-    const d = await r.json().catch(() => ({}))
-    if (!r.ok) {
-      dialog.toast(d.error || '保存失败', 'err')
-      return
-    }
-    secretInput.value = ''
-    dialog.toast('已保存 webhook_secret', 'ok')
-    await load()
-  } finally {
-    saving.value = false
   }
 }
 
@@ -158,5 +109,8 @@ async function copy(t: string) {
   }
 }
 
-onMounted(load)
+onMounted(async () => {
+ const r = await authFetch('/api/v1/admin/cardplatform/accounts'); if (r.ok) accounts.value = (await r.json()).accounts || []
+ await load()
+})
 </script>

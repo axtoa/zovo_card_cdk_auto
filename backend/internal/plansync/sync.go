@@ -48,18 +48,24 @@ func SyncNow(ctx context.Context) (SyncResult, error) {
 }
 
 func syncOnce(ctx context.Context) {
-	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	r, err := doSync(ctx2)
+	accounts, err := db.ListCardAccounts()
 	if err != nil {
-		log.Printf("[plan-sync] error: %v", err)
+		log.Printf("[plan-sync] accounts: %v", err)
 		return
 	}
-	log.Printf("[plan-sync] synced %d plans, %d products", r.Plans, r.Products)
+	for _, a := range accounts {
+		if a.APIKey == "" {
+			continue
+		}
+		_, err := SyncNow(cardplatform.WithAccount(ctx, a))
+		if err != nil {
+			log.Printf("[plan-sync] account=%d: %v", a.ID, err)
+		}
+	}
 }
 
 func doSync(ctx context.Context) (SyncResult, error) {
-	cfg := cardplatform.LoadConfig()
+	cfg := cardplatform.ConfigForContext(ctx)
 	if cfg.APIKey == "" {
 		return SyncResult{}, nil // 未配置 API Key，静默跳过
 	}
@@ -75,7 +81,7 @@ func doSync(ctx context.Context) (SyncResult, error) {
 		return res, err
 	}
 	for _, p := range plans.SellablePlans() {
-		if err := db.UpsertPlanStatus(p.Key, p.Label, true, p.ServiceFeeUsdMinor); err != nil {
+		if err := db.ForAccount(cli.AccountID()).UpsertPlanStatus(p.Key, p.Label, true, p.ServiceFeeUsdMinor); err != nil {
 			log.Printf("[plan-sync] upsert plan %s: %v", p.Key, err)
 		} else {
 			res.Plans++
@@ -115,14 +121,14 @@ func doSync(ctx context.Context) (SyncResult, error) {
 			Enabled:     true,
 			SuspendedAt: p.SuspendedAt,
 		}
-		if err := db.UpsertCardProduct(cp); err != nil {
+		if err := db.ForAccount(cli.AccountID()).UpsertCardProduct(cp); err != nil {
 			log.Printf("[plan-sync] upsert product %s: %v", code, err)
 		} else {
 			res.Products++
 		}
 	}
 	// 3. 本次未返回的历史缓存 → 标已下线（如全部 VISA 已从卡台下架）
-	if off, err := db.PruneCardProductsExcept(present); err != nil {
+	if off, err := db.ForAccount(cli.AccountID()).PruneCardProductsExcept(present); err != nil {
 		log.Printf("[plan-sync] prune products: %v", err)
 	} else if off > 0 {
 		log.Printf("[plan-sync] removed %d delisted products (not in openable list)", off)
@@ -157,13 +163,13 @@ func syncDirectCardProducts(ctx context.Context, cli *cardplatform.Client) (int,
 			Enabled:     p.Usable,
 			SuspendedAt: suspendedAt,
 		}
-		if err := db.UpsertCardProduct(cp); err != nil {
+		if err := db.ForAccount(cli.AccountID()).UpsertCardProduct(cp); err != nil {
 			log.Printf("[plan-sync] upsert direct product %s: %v", code, err)
 			continue
 		}
 		n++
 	}
-	if off, err := db.PruneCardProductsExcept(present); err != nil {
+	if off, err := db.ForAccount(cli.AccountID()).PruneCardProductsExcept(present); err != nil {
 		log.Printf("[plan-sync] prune products: %v", err)
 	} else if off > 0 {
 		log.Printf("[plan-sync] removed %d delisted products (not in card-products)", off)

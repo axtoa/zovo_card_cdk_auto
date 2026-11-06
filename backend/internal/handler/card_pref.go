@@ -2,12 +2,19 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/tuzi/cdk-recharge-system/internal/cardplatform"
 	"github.com/tuzi/cdk-recharge-system/internal/db"
 )
+
+var cardRulesMu sync.Mutex
 
 func hasEnabledSelectionRules() bool {
 	rules, err := db.GetCardSelectionRules()
@@ -108,14 +115,14 @@ func firstUsableCardPref(policy SiteRedeemPolicy, rules []db.CardSelectionRule, 
 
 // resolveIssueCardPref 发码/换码用的第一条可用偏好。
 // 不再要求「本站策略」开关：选卡配置本身就该生效。
-func resolveIssueCardPref(policy SiteRedeemPolicy) (issuer, segmentType, segmentKey string) {
+func resolveIssueCardPref(policy SiteRedeemPolicy, accountID int64) (issuer, segmentType, segmentKey string) {
 	rules, _ := db.GetCardSelectionRules()
-	products, _ := db.GetCardProducts()
+	products, _ := db.ForAccount(accountID).GetCardProducts()
 	return firstUsableCardPref(policy, rules, products)
 }
 
-func issuePrefFromSite() (cardplatform.IssueCardPref, bool) {
-	issuer, segType, segKey := resolveIssueCardPref(loadSiteRedeemPolicy())
+func issuePrefFromSite(accountID int64) (cardplatform.IssueCardPref, bool) {
+	issuer, segType, segKey := resolveIssueCardPref(loadSiteRedeemPolicy(), accountID)
 	if segKey == "" && issuer == "" {
 		return cardplatform.IssueCardPref{}, false
 	}
@@ -146,7 +153,39 @@ func injectRedeemCardPolicy(body map[string]any) {
 // SyncOwnerDirectCardRules 把本站选卡优先级推到卡台所有者账户。
 // 兑换走所有者名下的卡，只改 CDK 本地配置、不写卡台规则，卡台仍会走自己的 537872 级联。
 func SyncOwnerDirectCardRules(ctx context.Context) error {
-	cfg := cardplatform.LoadConfig()
+	accounts, err := db.ListCardAccounts()
+	if err != nil {
+		return err
+	}
+	var errs []error
+	results := []map[string]any{}
+	for _, a := range accounts {
+		if a.APIKey == "" {
+			results = append(results, map[string]any{"account_id": a.ID, "name": a.Name, "ok": false, "error": "尚未配置 API Key"})
+			errs = append(errs, fmt.Errorf("%s (#%d): 尚未配置 API Key", a.Name, a.ID))
+			continue
+		}
+		child, cancel := context.WithTimeout(ctx, 30*time.Second)
+		err := syncAccountDirectCardRules(cardplatform.WithAccount(child, a))
+		cancel()
+		note := ""
+		if err != nil {
+			note = err.Error()
+		}
+		results = append(results, map[string]any{"account_id": a.ID, "name": a.Name, "ok": err == nil, "error": note, "time": time.Now().UTC().Format(time.RFC3339)})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s (#%d): %w", a.Name, a.ID, err))
+		}
+	}
+	raw, _ := json.Marshal(results)
+	if err := db.SetSetting("card_rule_sync_results", string(raw)); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+func syncAccountDirectCardRules(ctx context.Context) error {
+	accountID := cardplatform.AccountID(ctx)
+	cfg := cardplatform.ConfigForContext(ctx)
 	if strings.TrimSpace(cfg.APIKey) == "" {
 		return nil
 	}
@@ -154,7 +193,7 @@ func SyncOwnerDirectCardRules(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	products, _ := db.GetCardProducts()
+	products, _ := db.ForAccount(accountID).GetCardProducts()
 	prefs := buildSelectPriority(rules, products)
 	policy := loadSiteRedeemPolicy()
 	cli := cardplatform.New(cfg)

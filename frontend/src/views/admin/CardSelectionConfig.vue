@@ -1,5 +1,10 @@
 <template>
   <div class="space-y-4">
+    <section class="card mb-4">
+      <div class="flex justify-between items-center gap-3"><div><strong>全站共用规则</strong><p class="text-sm text-muted">保存规则会同步到所有账号；本页所选账号只影响产品状态和坏卡记录的查看。</p></div><el-button :loading="syncingRules" @click="retryRuleSync">重新同步全部账号</el-button></div>
+      <div v-for="r in syncResults" :key="r.account_id" class="text-sm mt-2"><el-tag size="small" :type="r.ok ? 'success' : 'danger'">{{ r.ok ? '已同步' : '未同步' }}</el-tag> {{ r.name }} · {{ r.error || r.time }}</div>
+    </section>
+
 
     <!-- 产品在线状态 -->
     <div class="card">
@@ -308,7 +313,21 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { authFetch } from '../../lib/api'
+import { useAccountFetch } from '../../lib/cardAccounts'
+const { authFetch, accountId } = useAccountFetch()
+const syncResults = ref<any[]>([])
+const syncingRules = ref(false)
+async function retryRuleSync() {
+ syncingRules.value = true
+ try {
+  const r = await authFetch('/api/v1/admin/card-selection/rules/sync', { method: 'POST' })
+  const d = await r.json()
+  if (!r.ok) throw new Error(d.error || '同步失败')
+  syncResults.value = d.sync_results || []
+  dialog.toast(d.cardplatform_ok ? '全部账号规则已同步' : '部分账号同步失败，请查看结果', d.cardplatform_ok ? 'ok' : 'warn')
+ } catch (e: any) { dialog.toast(e.message, 'err') }
+ finally { syncingRules.value = false }
+}
 import { dialog } from '../../lib/dialog'
 
 interface CardProduct {
@@ -459,6 +478,7 @@ async function loadRules() {
   const d = await r.json().catch(() => ({}))
   lastSync.value = d.last_sync || ''
   nextSync.value = d.next_sync || ''
+  syncResults.value = d.sync_results || []
   rules.value = (d.rules || []).map((item: any) => ({
     ...item,
     _id: ++_idSeq,
@@ -508,7 +528,8 @@ async function saveRules() {
     })
     const d = await r.json().catch(() => ({}))
     if (!r.ok) { dialog.toast(d.error || '保存失败', 'err'); return }
-    rules.value = (d.rules || []).map((item: any) => ({
+    syncResults.value = d.sync_results || []
+  rules.value = (d.rules || []).map((item: any) => ({
       ...item, _id: ++_idSeq, enabled: item.enabled !== false,
     }))
     if (d.cardplatform_ok === false) {

@@ -2,25 +2,25 @@ package handler
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tuzi/cdk-recharge-system/internal/cardplatform"
 	"github.com/tuzi/cdk-recharge-system/internal/db"
 )
 
 // 允许写入 site_settings 的公开安全键（无密钥）
 var publicSettingKeys = map[string]bool{
-	"brand_name":  true,
-	"brand_sub":   true,
-	"skin":        true,
-	"theme_mode":  true,
+	"brand_name": true,
+	"brand_sub":  true,
+	"skin":       true,
+	"theme_mode": true,
 }
 
 // 密钥类键：只接受写入，读出脱敏
 var secretSettingKeys = map[string]bool{
 	"card_api_base":    false,
-	"card_api_key":     true,
-	"webhook_secret":   true, // 卡台开发者页 whsec_…
 	"telegram_token":   true,
 	"telegram_chat_id": false,
 	// agent_swap handled specially (hash)
@@ -88,6 +88,35 @@ func AdminPutSettings(c *gin.Context) {
 		return
 	}
 
+	if (body.CardAPIKey != nil && strings.TrimSpace(*body.CardAPIKey) != "") || (body.WebhookSecret != nil && strings.TrimSpace(*body.WebhookSecret) != "") {
+		c.JSON(400, gin.H{"error": "请在卡台接入的账号列表中配置密钥"})
+		return
+	}
+
+	if body.CardAPIBase != nil {
+		cardAccountConfigMu.Lock()
+		defer cardAccountConfigMu.Unlock()
+		v := strings.TrimRight(strings.TrimSpace(*body.CardAPIBase), "/")
+		v = strings.TrimSuffix(strings.TrimSuffix(v, "/openapi/v1"), "/openapi")
+		u, err := url.Parse(v)
+		if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") || (u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost"))) {
+			c.JSON(400, gin.H{"error": "请填写有效的 HTTPS 卡台根地址"})
+			return
+		}
+		accounts, err := db.ListCardAccounts()
+		if err != nil {
+			c.JSON(500, gin.H{"error": "读取账号失败"})
+			return
+		}
+		for _, a := range accounts {
+			if a.APIKey != "" && v != cardplatform.LoadConfig().SiteBase {
+				c.JSON(409, gin.H{"error": "已有账号，不能更换卡台站点以免旧码失效"})
+				return
+			}
+		}
+		body.CardAPIBase = &v
+	}
+
 	setIf := func(key string, p *string, max int) error {
 		if p == nil {
 			return nil
@@ -105,7 +134,7 @@ func AdminPutSettings(c *gin.Context) {
 
 	allowedSkins := map[string]bool{
 		"best-ai": true,
-		"zovo": true, "terracotta": true, "ocean": true, "cyber": true, "forest": true, "violet": true,
+		"zovo":    true, "terracotta": true, "ocean": true, "cyber": true, "forest": true, "violet": true,
 		"slate": true, "rose": true, "ember": true, "noir": true, "paper": true,
 	}
 	if body.Skin != nil {
@@ -126,11 +155,12 @@ func AdminPutSettings(c *gin.Context) {
 	}
 	_ = setIf("brand_name", body.BrandName, 40)
 	_ = setIf("brand_sub", body.BrandSub, 80)
-	_ = setIf("card_api_base", body.CardAPIBase, 200)
-	_ = setIf("card_api_key", body.CardAPIKey, 200)
+	if err := setIf("card_api_base", body.CardAPIBase, 0); err != nil {
+		c.JSON(500, gin.H{"error": "卡台站点保存失败"})
+		return
+	}
 	_ = setIf("telegram_token", body.TelegramToken, 200)
 	_ = setIf("telegram_chat_id", body.TelegramChatID, 64)
-	_ = setIf("webhook_secret", body.WebhookSecret, 200)
 	if body.AgentSwapPassword != nil {
 		pw := strings.TrimSpace(*body.AgentSwapPassword)
 		if pw != "" {

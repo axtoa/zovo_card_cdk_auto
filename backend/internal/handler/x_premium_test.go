@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"github.com/gin-gonic/gin"
+	"github.com/tuzi/cdk-recharge-system/internal/cardplatform"
 	"github.com/tuzi/cdk-recharge-system/internal/db"
 	"net/http"
 	"net/http/httptest"
@@ -20,7 +21,7 @@ func TestXIssueInfersProductWithoutQueryParameter(t *testing.T) {
 	old := db.DB
 	db.DB = c
 	t.Cleanup(func() { db.DB = old; c.Close() })
-	for _, q := range []string{`CREATE TABLE site_settings(key TEXT PRIMARY KEY,value TEXT,updated_at DATETIME)`, `CREATE TABLE cardplatform_cdk_codes(upstream_id INTEGER,code TEXT UNIQUE NOT NULL,code_prefix TEXT,plan TEXT,fee_amount_minor INTEGER,status TEXT,payment_country TEXT,created_at DATETIME)`} {
+	for _, q := range []string{`CREATE TABLE site_settings(key TEXT PRIMARY KEY,value TEXT,updated_at DATETIME)`, `CREATE TABLE cardplatform_cdk_codes(account_id INTEGER NOT NULL DEFAULT 1,upstream_id INTEGER,code TEXT UNIQUE NOT NULL,code_prefix TEXT,plan TEXT,fee_amount_minor INTEGER,status TEXT,payment_country TEXT,created_at DATETIME)`} {
 		if _, err = c.Exec(q); err != nil {
 			t.Fatal(err)
 		}
@@ -33,17 +34,17 @@ func TestXIssueInfersProductWithoutQueryParameter(t *testing.T) {
 			if r.URL.Query().Get("product") != "x" {
 				t.Error("X issue fetched GPT catalogue")
 			}
-			w.Write([]byte(`{"code":0,"data":{"version":1,"plans":{"x_basic_monthly":{"enabled":true,"currency":"JPY"}},"registry":[{"key":"basic_monthly","label":"X Basic"}]}}`))
+			w.Write([]byte(`{"code":0,"data":{"version":1,"plans":{"x_plus_monthly":{"enabled":true,"currency":"JPY"}},"registry":[{"key":"plus_monthly","label":"X Basic"}]}}`))
 		case "/openapi/v1/gpt-direct/cdks":
 			var b map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
 				t.Error(err)
 			}
-			if b["plan"] != "basic_monthly" || b["payment_country"] != "JP" {
+			if b["plan"] != "plus_monthly" || b["payment_country"] != "US" {
 				t.Error("wrong X issue parameters")
 			}
 			issued++
-			w.Write([]byte(`{"code":0,"data":{"requested":1,"issued":[{"id":1,"code":"ZC-FAKE-TEST-X-CODE","plan":"basic_monthly","payment_country":"JP"}]}}`))
+			w.Write([]byte(`{"code":0,"data":{"requested":1,"issued":[{"id":1,"code":"ZC-FAKE-TEST-X-CODE","plan":"plus_monthly","payment_country":"JP"}]}}`))
 		default:
 			t.Errorf("unexpected endpoint %s", r.URL.Path)
 			w.WriteHeader(404)
@@ -58,8 +59,12 @@ func TestXIssueInfersProductWithoutQueryParameter(t *testing.T) {
 	}
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(cardplatform.WithAccount(c.Request.Context(), db.CardAccount{ID: 1, APIKey: "fixture-key"}))
+		c.Next()
+	})
 	r.POST("/issue", CardPlatformIssueCDKs)
-	req := httptest.NewRequest("POST", "/issue", strings.NewReader(`{"plan":"basic_monthly","count":1,"funding_confirmed":true}`))
+	req := httptest.NewRequest("POST", "/issue", strings.NewReader(`{"plan":"plus_monthly","count":1,"funding_confirmed":true}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)

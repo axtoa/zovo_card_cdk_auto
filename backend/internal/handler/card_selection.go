@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -19,12 +20,12 @@ type cardSelectionRuleView struct {
 	ServiceFeeUSD float64 `json:"service_fee_usd"`
 }
 
-func cardSelectionRulesPayload() (gin.H, error) {
+func cardSelectionRulesPayload(accountID int64) (gin.H, error) {
 	rules, err := db.GetCardSelectionRules()
 	if err != nil {
 		return nil, err
 	}
-	products, _ := db.GetCardProducts()
+	products, _ := db.ForAccount(accountID).GetCardProducts()
 	prodByCode := map[string]db.CardProductCache{}
 	for _, p := range products {
 		prodByCode[strings.ToUpper(strings.TrimSpace(p.ProductCode))] = p
@@ -40,20 +41,24 @@ func cardSelectionRulesPayload() (gin.H, error) {
 	}
 	lastSync := latestProductSyncTime(products)
 	if lastSync == "" {
-		statuses, _ := db.GetPlanStatusCache()
+		statuses, _ := db.ForAccount(accountID).GetPlanStatusCache()
 		lastSync = latestSyncTime(statuses)
 	}
+	var syncResults []map[string]any
+	raw, _ := db.GetSetting("card_rule_sync_results")
+	_ = json.Unmarshal([]byte(raw), &syncResults)
 	return gin.H{
-		"rules":     out,
-		"last_sync": lastSync,
-		"next_sync": nextSyncIn(lastSync),
+		"sync_results": syncResults,
+		"rules":        out,
+		"last_sync":    lastSync,
+		"next_sync":    nextSyncIn(lastSync),
 	}, nil
 }
 
 // AdminGetCardSelectionRules GET /api/v1/admin/card-selection/rules
 // 返回选卡优先级规则列表（含实时产品在线状态）
 func AdminGetCardSelectionRules(c *gin.Context) {
-	payload, err := cardSelectionRulesPayload()
+	payload, err := cardSelectionRulesPayload(cardplatform.AccountID(c.Request.Context()))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -64,6 +69,8 @@ func AdminGetCardSelectionRules(c *gin.Context) {
 // AdminPutCardSelectionRules PUT /api/v1/admin/card-selection/rules
 // 整体替换选卡规则配置（顺序 = 优先级）
 func AdminPutCardSelectionRules(c *gin.Context) {
+	cardRulesMu.Lock()
+	defer cardRulesMu.Unlock()
 	var body struct {
 		Rules []db.CardSelectionRule `json:"rules"`
 	}
@@ -92,7 +99,7 @@ func AdminPutCardSelectionRules(c *gin.Context) {
 	if err := SyncOwnerDirectCardRules(c.Request.Context()); err != nil {
 		syncNote = err.Error()
 	}
-	payload, err := cardSelectionRulesPayload()
+	payload, err := cardSelectionRulesPayload(cardplatform.AccountID(c.Request.Context()))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -107,12 +114,12 @@ func AdminPutCardSelectionRules(c *gin.Context) {
 // AdminGetPlanStatus GET /api/v1/admin/card-selection/plan-status
 // 返回逻辑套餐状态缓存 + 实体产品缓存（含最后同步时间）
 func AdminGetPlanStatus(c *gin.Context) {
-	statuses, err := db.GetPlanStatusCache()
+	statuses, err := db.ForAccount(cardplatform.AccountID(c.Request.Context())).GetPlanStatusCache()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	products, _ := db.GetCardProducts()
+	products, _ := db.ForAccount(cardplatform.AccountID(c.Request.Context())).GetCardProducts()
 	lastSync := latestSyncTime(statuses)
 	if lastSync == "" {
 		lastSync = latestProductSyncTime(products)
@@ -128,7 +135,7 @@ func AdminGetPlanStatus(c *gin.Context) {
 // AdminSyncPlanStatus POST /api/v1/admin/card-selection/sync
 // 立即触发一次产品状态同步（主动同步）
 func AdminSyncPlanStatus(c *gin.Context) {
-	cfg := cardplatform.LoadConfig()
+	cfg := cardplatform.ConfigForContext(c.Request.Context())
 	if cfg.APIKey == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "card_api_key not configured"})
 		return
@@ -187,7 +194,7 @@ func nextSyncIn(lastSync string) string {
 // AdminGetSiteRedeemPolicy GET /api/v1/admin/card-selection/site-policy
 func AdminGetSiteRedeemPolicy(c *gin.Context) {
 	p := loadSiteRedeemPolicy()
-	issuer, segType, segKey := resolveIssueCardPref(p)
+	issuer, segType, segKey := resolveIssueCardPref(p, cardplatform.AccountID(c.Request.Context()))
 	c.JSON(http.StatusOK, gin.H{
 		"policy": p,
 		"resolved_pref": gin.H{
@@ -199,6 +206,8 @@ func AdminGetSiteRedeemPolicy(c *gin.Context) {
 
 // AdminPutSiteRedeemPolicy PUT /api/v1/admin/card-selection/site-policy
 func AdminPutSiteRedeemPolicy(c *gin.Context) {
+	cardRulesMu.Lock()
+	defer cardRulesMu.Unlock()
 	var p SiteRedeemPolicy
 	if err := c.ShouldBindJSON(&p); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
@@ -213,7 +222,7 @@ func AdminPutSiteRedeemPolicy(c *gin.Context) {
 	if err := SyncOwnerDirectCardRules(c.Request.Context()); err != nil {
 		syncNote = err.Error()
 	}
-	issuer, segType, segKey := resolveIssueCardPref(p)
+	issuer, segType, segKey := resolveIssueCardPref(p, cardplatform.AccountID(c.Request.Context()))
 	c.JSON(http.StatusOK, gin.H{
 		"policy": p,
 		"resolved_pref": gin.H{
@@ -223,4 +232,20 @@ func AdminPutSiteRedeemPolicy(c *gin.Context) {
 		"cardplatform_err": syncNote,
 		"note":             "保存后会把选卡优先级同步到卡台所有者规则（strict_select）。未启动的卡头会被跳过。",
 	})
+}
+
+func AdminSyncCardRules(c *gin.Context) {
+	cardRulesMu.Lock()
+	defer cardRulesMu.Unlock()
+	err := SyncOwnerDirectCardRules(c.Request.Context())
+	payload, e := cardSelectionRulesPayload(cardplatform.AccountID(c.Request.Context()))
+	if e != nil {
+		c.JSON(500, gin.H{"error": e.Error()})
+		return
+	}
+	payload["cardplatform_ok"] = err == nil
+	if err != nil {
+		payload["cardplatform_err"] = err.Error()
+	}
+	c.JSON(200, payload)
 }

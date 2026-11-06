@@ -22,6 +22,7 @@ const defaultBase = "https://zovocard.com"
 
 // Config 从 site_settings（优先）与环境变量读取。
 type Config struct {
+	AccountID int64
 	// SiteBase 如 https://zovocard.com（不含 /openapi）
 	SiteBase string
 	// APIKey sk_...
@@ -30,12 +31,8 @@ type Config struct {
 
 func LoadConfig() Config {
 	base, _ := db.GetSetting("card_api_base")
-	key, _ := db.GetSetting("card_api_key")
 	if strings.TrimSpace(base) == "" {
 		base = os.Getenv("CARD_API_BASE")
-	}
-	if strings.TrimSpace(key) == "" {
-		key = os.Getenv("CARD_API_KEY")
 	}
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	// 兼容用户填了 .../openapi/v1
@@ -44,7 +41,7 @@ func LoadConfig() Config {
 	if base == "" {
 		base = defaultBase
 	}
-	return Config{SiteBase: base, APIKey: strings.TrimSpace(key)}
+	return Config{SiteBase: base, APIKey: ""}
 }
 
 func (c Config) OpenAPIBase() string {
@@ -679,7 +676,7 @@ func (c *Client) SyncUpstreamFullCodes(ctx context.Context, status, plan string,
 			out.Scanned++
 			code := it.FullCodeText()
 			if code == "" {
-				_ = db.UpdateCardplatformCDKRegion(it.ID, it.PaymentCountry)
+				_ = db.ForAccount(c.cfg.AccountID).UpdateCardplatformCDKRegion(it.ID, it.PaymentCountry)
 				out.PrefixOnly++
 				continue
 			}
@@ -687,8 +684,8 @@ func (c *Client) SyncUpstreamFullCodes(ctx context.Context, status, plan string,
 			if prefix == "" && len(code) >= 14 {
 				prefix = code[:14]
 			}
-			_, existed := db.LookupCardplatformCDKCode(it.ID, prefix)
-			if err := db.SaveCardplatformCDKCodeWithStatus(it.ID, code, prefix, it.Plan, it.FeeAmountMinor, it.Status, it.PaymentCountry); err != nil {
+			_, existed := db.ForAccount(c.cfg.AccountID).LookupCardplatformCDKCode(it.ID, prefix)
+			if err := db.ForAccount(c.cfg.AccountID).SaveCardplatformCDKCodeWithStatus(it.ID, code, prefix, it.Plan, it.FeeAmountMinor, it.Status, it.PaymentCountry); err != nil {
 				continue
 			}
 			if existed {

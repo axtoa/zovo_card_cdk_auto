@@ -8,13 +8,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/tuzi/cdk-recharge-system/internal/cardplatform"
-	"github.com/tuzi/cdk-recharge-system/internal/db"
 )
 
 // CardPlatformPing GET /api/v1/admin/cardplatform/ping
 // 探测卡台是否可达，并返回解析后的 OpenAPI / CDK 路径与出口 IP。
 func CardPlatformPing(c *gin.Context) {
-	cfg := cardplatform.LoadConfig()
+	cfg := cardplatform.ConfigForContext(c.Request.Context())
 	base := cfg.SiteBase
 	if strings.TrimSpace(base) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "card_api_base not configured"})
@@ -58,7 +57,7 @@ func CardPlatformPing(c *gin.Context) {
 	}
 
 	egressIP, egressSrc, _ := detectEgressIP(c.Request.Context())
-	keyCfg, _ := db.GetSetting("card_api_key")
+	keyCfg := cfg.APIKey
 
 	if probed == "" {
 		c.JSON(http.StatusBadGateway, gin.H{

@@ -73,7 +73,14 @@
         </div>
       </header>
 
-      <main class="page"><router-view /></main>
+      <main class="page">
+        <router-view v-slot="{ Component }">
+          <AccountBoundary v-if="accountPage" :key="route.path" :issuing="route.path === '/ops/cdkeys'" v-slot="{ accountId }">
+            <component :is="Component" :key="`${route.path}:${accountId}`" />
+          </AccountBoundary>
+          <component v-else :is="Component" />
+        </router-view>
+      </main>
     </div>
   </div>
 </template>
@@ -86,9 +93,11 @@ import { serverLogout } from '../lib/api'
 import { siteBrand, currentSkinMeta } from '../theme'
 import SkinPicker from '../components/SkinPicker.vue'
 import SiteBrand from '../components/SiteBrand.vue'
+import AccountBoundary from '../components/admin/AccountBoundary.vue'
 
 const route = useRoute()
 const router = useRouter()
+const accountPage = computed(() => ['/ops', '/ops/cdkeys', '/ops/orders', '/ops/card-selection'].includes(route.path))
 const auth = useAuthStore()
 const brand = siteBrand
 

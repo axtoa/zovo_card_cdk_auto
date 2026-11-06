@@ -29,7 +29,9 @@ func TestCDKRegionMigrationAndCache(t *testing.T) {
 	check(err)
 	check(migrateCardplatformCDKRegionCol())
 	check(migrateCardplatformCDKRegionCol())
-	list, _, err := ListCardplatformStoredCDKCodesPage("", "", "", 1, 20)
+	_, err = conn.Exec(`ALTER TABLE cardplatform_cdk_codes ADD COLUMN account_id INTEGER NOT NULL DEFAULT 1`)
+	check(err)
+	list, _, err := ForAccount(1).ListCardplatformStoredCDKCodesPage("", "", "", 1, 20)
 	check(err)
 	if len(list) != 1 || list[0].PaymentCountry != nil || list[0].FeeAmountMinor != 15 {
 		t.Fatalf("legacy row changed: %+v", list)
@@ -41,13 +43,13 @@ func TestCDKRegionMigrationAndCache(t *testing.T) {
 	if wire["payment_country"] != nil {
 		t.Fatal("unknown region became default")
 	}
-	check(UpdateCardplatformCDKRegion(1, " cl "))
-	check(SaveCardplatformCDKCode(2, "ZC-SYNTHETIC-JP-CODE", "", "plus", 15, "JP"))
-	check(SaveCardplatformCDKCode(3, "ZC-SYNTHETIC-DEFAULT", "", "plus", 15, ""))
+	check(ForAccount(1).UpdateCardplatformCDKRegion(1, " cl "))
+	check(ForAccount(1).SaveCardplatformCDKCode(2, "ZC-SYNTHETIC-JP-CODE", "", "plus", 15, "JP"))
+	check(ForAccount(1).SaveCardplatformCDKCode(3, "ZC-SYNTHETIC-DEFAULT", "", "plus", 15, ""))
 	// An older browser's code-cache write must not erase synced metadata.
-	check(SaveCardplatformCDKCode(2, "ZC-SYNTHETIC-JP-CODE", "", "plus", 15))
-	check(UpdateCardplatformCDKStatus(1, "disabled"))
-	list, n, err := ListCardplatformStoredCDKCodesPage("", "", "", 1, 20)
+	check(ForAccount(1).SaveCardplatformCDKCode(2, "ZC-SYNTHETIC-JP-CODE", "", "plus", 15))
+	check(ForAccount(1).UpdateCardplatformCDKStatus(1, "disabled"))
+	list, n, err := ForAccount(1).ListCardplatformStoredCDKCodesPage("", "", "", 1, 20)
 	check(err)
 	if n != 3 {
 		t.Fatal(n)
@@ -81,16 +83,19 @@ func TestLookupStoredCDKRegionDistinguishesUnknown(t *testing.T) {
 	_, _ = conn.Exec(`INSERT INTO cardplatform_cdk_codes VALUES(1,'ZC-OLD','ZC','plus',15,'unused',NULL,CURRENT_TIMESTAMP)`)
 	_, _ = conn.Exec(`INSERT INTO cardplatform_cdk_codes VALUES(2,'ZC-CL','ZC','pro_5x',15,'unused','cl',CURRENT_TIMESTAMP)`)
 	_, _ = conn.Exec(`INSERT INTO cardplatform_cdk_codes VALUES(3,'ZC-PH','ZC','plus',15,'unused','',CURRENT_TIMESTAMP)`)
-	if c, ok := LookupStoredCDKRegion(1); ok || c != "" {
+	if _, err := conn.Exec(`ALTER TABLE cardplatform_cdk_codes ADD COLUMN account_id INTEGER NOT NULL DEFAULT 1`); err != nil {
+		t.Fatal(err)
+	}
+	if c, ok := ForAccount(1).LookupStoredCDKRegion(1); ok || c != "" {
 		t.Fatal("NULL 地区必须是未知，不能当默认区")
 	}
-	if c, ok := LookupStoredCDKRegion(2); !ok || c != "CL" {
+	if c, ok := ForAccount(1).LookupStoredCDKRegion(2); !ok || c != "CL" {
 		t.Fatalf("CL 地区读错: %q %v", c, ok)
 	}
-	if c, ok := LookupStoredCDKRegion(3); !ok || c != "" {
+	if c, ok := ForAccount(1).LookupStoredCDKRegion(3); !ok || c != "" {
 		t.Fatal("空串是明确的默认区")
 	}
-	if _, ok := LookupStoredCDKRegion(99); ok {
+	if _, ok := ForAccount(1).LookupStoredCDKRegion(99); ok {
 		t.Fatal("没有这行应为未知")
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tuzi/cdk-recharge-system/internal/cardplatform"
 	"github.com/tuzi/cdk-recharge-system/internal/db"
 )
 
@@ -30,16 +31,16 @@ func TestCDKListRegionRoundTripAndPageRefresh(t *testing.T) {
 	}
 	for _, q := range []string{
 		`CREATE TABLE site_settings(key TEXT PRIMARY KEY,value TEXT,updated_at DATETIME)`,
-		`CREATE TABLE cardplatform_cdk_codes(upstream_id INTEGER,code TEXT UNIQUE NOT NULL,code_prefix TEXT,plan TEXT,fee_amount_minor INTEGER,status TEXT,payment_country TEXT,created_at DATETIME)`,
-		`CREATE TABLE cardplatform_cdk_notes(upstream_id INTEGER PRIMARY KEY,note TEXT)`,
+		`CREATE TABLE cardplatform_cdk_codes(account_id INTEGER NOT NULL DEFAULT 1,upstream_id INTEGER,code TEXT UNIQUE NOT NULL,code_prefix TEXT,plan TEXT,fee_amount_minor INTEGER,status TEXT,payment_country TEXT,created_at DATETIME)`,
+		`CREATE TABLE cardplatform_cdk_notes(account_id INTEGER NOT NULL DEFAULT 1,upstream_id INTEGER,note TEXT,PRIMARY KEY(account_id,upstream_id))`,
 	} {
 		_, e := conn.Exec(q)
 		check(e)
 	}
 	for id := int64(1); id <= 3; id++ {
-		check(db.SaveCardplatformCDKCode(id, "ZC-SYNTHETIC-CODE-"+strconv.FormatInt(id, 10), "", "plus", 15))
+		check(db.ForAccount(1).SaveCardplatformCDKCode(id, "ZC-SYNTHETIC-CODE-"+strconv.FormatInt(id, 10), "", "plus", 15))
 	}
-	check(db.UpdateCardplatformCDKRegion(3, "US"))
+	check(db.ForAccount(1).UpdateCardplatformCDKRegion(3, "US"))
 	var mu sync.Mutex
 	queries := []string{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +72,10 @@ func TestCDKListRegionRoundTripAndPageRefresh(t *testing.T) {
 	check(db.SetSetting("card_api_key", "synthetic-test-key"))
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(cardplatform.WithAccount(c.Request.Context(), db.CardAccount{ID: 1, APIKey: "synthetic-test-key"}))
+		c.Next()
+	})
 	router.GET("/stored", CardPlatformListStoredCDKs)
 	router.GET("/upstream", CardPlatformListCDKs)
 	get := func(path string) []map[string]any {

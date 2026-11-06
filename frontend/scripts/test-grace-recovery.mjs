@@ -20,6 +20,7 @@ const mocks={
  'vue-router':'export const useRoute=()=>({query:{}})',
  'vue-i18n':'export const useI18n=()=>({t:k=>k})',
  '../../lib/dialog':'export const dialog={confirm:globalThis.__graceTest.confirm,toast(){}}',
+ '../../components/UserPageHeader.vue':'export default {}',
  '../../components/LanguageToggle.vue':'export default {}',
  '../../components/ThemeToggle.vue':'export default {}',
  '../../components/RedeemModeTabs.vue':'export default {}',

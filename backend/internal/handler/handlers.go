@@ -652,11 +652,11 @@ func GetSystemStats(c *gin.Context) {
 
 	var webhookCount int
 	if db.DB != nil {
-		_ = db.DB.QueryRow(`SELECT COUNT(*) FROM webhook_events`).Scan(&webhookCount)
+		_ = db.DB.QueryRow(`SELECT COUNT(*) FROM webhook_events WHERE account_id=?`, cardplatform.AccountID(c.Request.Context())).Scan(&webhookCount)
 	}
 	out["webhook_events"] = webhookCount
 
-	cfg := cardplatform.LoadConfig()
+	cfg := cardplatform.ConfigForContext(c.Request.Context())
 	if cfg.APIKey == "" {
 		out["error"] = "未配置卡台 API Key"
 		// 仍返回 200，前端展示提示
@@ -665,7 +665,7 @@ func GetSystemStats(c *gin.Context) {
 	}
 	out["configured"] = true
 
-	cli := cardplatform.NewFromSettings()
+	cli := cardplatform.NewForContext(c.Request.Context())
 	ctx := c.Request.Context()
 
 	sum, err := cli.SummarizeCDKs(ctx, 50)

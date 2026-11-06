@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -122,6 +123,7 @@ func orderLooksUnpaid(status, stage string, finalMinor int64, events []map[strin
 
 // PublicAgentCDKExchange POST /api/v1/public/cdk/exchange
 // body: { password, code }  校验代理密码后，未扣款失败的 CDK 换一张同套餐新码。
+
 func PublicAgentCDKExchange(c *gin.Context) {
 	ip := c.ClientIP()
 	if !swapRateAllow(ip) {
@@ -150,8 +152,13 @@ func PublicAgentCDKExchange(c *gin.Context) {
 		return
 	}
 	codeHash := db.HashCDKCode(code)
-	if db.AgentCDKAlreadyExchanged(codeHash) {
-		c.JSON(http.StatusConflict, gin.H{"error": "该卡密已换过新码，不可重复兑换"})
+	pending, pendingErr := db.AgentExchangePendingOrDone(codeHash)
+	if pendingErr != nil {
+		c.JSON(503, gin.H{"error": "无法核对补发记录，未执行补发"})
+		return
+	}
+	if pending {
+		c.JSON(http.StatusConflict, gin.H{"error": "该卡密已提交过补发，不能重复购买。若未收到新码，请联系管理员核对原账号的补发记录"})
 		return
 	}
 
@@ -162,10 +169,18 @@ func PublicAgentCDKExchange(c *gin.Context) {
 	}
 	plan = strings.ToLower(strings.TrimSpace(plan))
 	if plan == "" {
-		plan = "plus"
+		c.JSON(409, gin.H{"error": "无法确认原套餐，未执行补发，请联系管理员"})
+		return
 	}
 
-	cli := cardplatform.NewFromSettings()
+	accountID := db.AccountIDForCode(code)
+	account, accountErr := db.GetCardAccount(accountID)
+	if accountErr != nil || accountID <= 0 {
+		c.JSON(409, gin.H{"error": "无法确认卡密所属账号，请联系管理员"})
+		return
+	}
+	c.Request = c.Request.WithContext(cardplatform.WithAccount(c.Request.Context(), account))
+	cli := cardplatform.NewForAccount(account)
 	// 查该 CDK 的订单（卡台 OpenAPI）
 	raw, err := cli.ListCDKOrdersQuery(c.Request.Context(), cardplatform.CDKOrderListQuery{
 		Page: 1, PageSize: 20, CDKID: upstreamID,
@@ -184,6 +199,10 @@ func PublicAgentCDKExchange(c *gin.Context) {
 		return
 	}
 
+	if total > len(list) {
+		c.JSON(409, gin.H{"error": "原卡密订单较多，无法完整确认是否有成功扣款，请联系管理员核对"})
+		return
+	}
 	// 取最近一单
 	latest := list[0]
 	orderID := int64(anyToInt64(latest["order_id"]))
@@ -194,15 +213,37 @@ func PublicAgentCDKExchange(c *gin.Context) {
 	stage := strings.ToLower(strAny(latest["stage"]))
 	finalMinor := anyToInt64(latest["final_amount_minor"])
 
+	if orderID <= 0 {
+		c.JSON(409, gin.H{"error": "无法确认原订单编号，未执行补发"})
+		return
+	}
 	// 拉详情看 events 的 payment_fact
 	var events []map[string]any
 	if orderID > 0 {
-		if detailRaw, err := cli.GetCDKOrder(c.Request.Context(), strconv.FormatInt(orderID, 10)); err == nil {
+		detailRaw, detailErr := cli.GetCDKOrder(c.Request.Context(), strconv.FormatInt(orderID, 10))
+		if detailErr != nil {
+			c.JSON(503, gin.H{"error": "暂时无法核对原订单扣款记录，未执行补发，请稍后重试"})
+			return
+		}
+		{
 			if evs := extractOrderEvents(detailRaw); len(evs) > 0 {
 				events = evs
 			}
 			// 详情里的 order 覆盖
-			if m := extractOrderMap(detailRaw); m != nil {
+			detail := extractOrderMap(detailRaw)
+			if detail == nil || strings.TrimSpace(strAny(detail["status"])) == "" {
+				c.JSON(503, gin.H{"error": "卡台订单详情不完整，未执行补发"})
+				return
+			}
+			detailID := anyToInt64(detail["id"])
+			if detailID == 0 {
+				detailID = anyToInt64(detail["order_id"])
+			}
+			if detailID != orderID || (anyToInt64(detail["cdk_id"]) > 0 && anyToInt64(detail["cdk_id"]) != upstreamID) {
+				c.JSON(503, gin.H{"error": "卡台订单详情与原卡密不匹配，未执行补发"})
+				return
+			}
+			if m := detail; m != nil {
 				if s := strAny(m["status"]); s != "" {
 					status = strings.ToLower(s)
 				}
@@ -239,7 +280,7 @@ func PublicAgentCDKExchange(c *gin.Context) {
 	// ★新码必须与旧码同一付款地区★：补发原来只带套餐，智利/日本等地区码补发出来全成了默认菲律宾区，
 	// 用户兑换时按 PHP 走、和原单完全不是一回事（2026-10-10 代理反馈）。地区以本站缓存为准，
 	// 老数据没记过地区就去卡台查；两边都拿不到就拒绝补发——宁可让代理找管理员，也不发错区的码。
-	country, known := db.LookupStoredCDKRegion(upstreamID)
+	country, known := db.ForAccount(cli.AccountID()).LookupStoredCDKRegion(upstreamID)
 	if !known {
 		country, known = upstreamCDKRegion(c, cli, upstreamID)
 	}
@@ -248,10 +289,19 @@ func PublicAgentCDKExchange(c *gin.Context) {
 		return
 	}
 	// 发一张同套餐、同地区的新码（带本站选卡偏好；跳过未启动卡头）
-	sitePref, hasSitePref := issuePrefFromSite()
+	sitePref, hasSitePref := issuePrefFromSite(cli.AccountID())
 	issuePrefs := agentSwapIssuePrefs(sitePref, hasSitePref, country)
 
-	idem := "agent-swap-" + codeHash[:16] + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	claimed, claimErr := db.ForAccount(accountID).ClaimAgentExchange(codeHash)
+	if claimErr != nil {
+		c.JSON(503, gin.H{"error": "无法保存补发请求，未执行购买"})
+		return
+	}
+	if !claimed {
+		c.JSON(409, gin.H{"error": "该卡密已有补发请求，请勿重复操作"})
+		return
+	}
+	idem := "agent-swap-" + codeHash
 	var res *cardplatform.IssueCDKResult
 	if len(issuePrefs) > 0 {
 		res, err = cli.IssueCDKs(c.Request.Context(), plan, 1, idem, issuePrefs[0])
@@ -259,11 +309,12 @@ func PublicAgentCDKExchange(c *gin.Context) {
 		res, err = cli.IssueCDKs(c.Request.Context(), plan, 1, idem)
 	}
 	if err != nil {
-		writeCardErr(c, err)
+		log.Printf("[agent-exchange] issue uncertain account=%d old=%d: %v", accountID, upstreamID, err)
+		c.JSON(502, gin.H{"error": "补发请求结果未确认，已锁定重复购买，请联系管理员核对卡台记录"})
 		return
 	}
-	if res == nil || len(res.Issued) == 0 || strings.TrimSpace(res.Issued[0].Code) == "" {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "发新码失败：卡台未返回完整码"})
+	if res == nil || len(res.Issued) != 1 || strings.TrimSpace(res.Issued[0].Code) == "" {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "卡台未返回完整新码，已锁定重复购买，请联系管理员核对"})
 		return
 	}
 	newIt := res.Issued[0]
@@ -272,22 +323,46 @@ func PublicAgentCDKExchange(c *gin.Context) {
 	if newPrefix == "" && len(newCode) >= 14 {
 		newPrefix = newCode[:14]
 	}
+	store := db.ForAccount(accountID)
+	manual := func(message string) {
+		db.WriteAudit("agent-swap", "agent_cdk_exchange.manual_review", fmt.Sprintf("account_id=%d old=%d new=%d", accountID, upstreamID, newIt.ID), ip)
+		c.JSON(409, gin.H{"error": message + "；请联系管理员核对，已阻止重复购买", "new_cdk_id": newIt.ID})
+	}
+	if err := store.SaveAgentExchangeIssued(codeHash, newIt.ID, newCode); err != nil {
+		manual("新码已生成，但补发记录保存失败")
+		return
+	}
+	if newIt.ID <= 0 || newIt.ID == upstreamID || strings.EqualFold(newCode, code) {
+		manual("卡台返回的新码编号或卡密异常")
+		return
+	}
 	if got := strings.ToUpper(strings.TrimSpace(newIt.PaymentCountry)); got != "" && got != country {
-		log.Printf("[agent-exchange] 新码 %d 地区 %s 与旧码 %d 地区 %q 不一致", newIt.ID, got, upstreamID, country)
+		manual("卡台返回的新码付款地区与原码不一致")
+		return
 	}
-	_ = db.SaveCardplatformCDKCode(newIt.ID, newCode, newPrefix, plan, newIt.FeeAmountMinor, country)
-
-	// 禁用旧码（防再次兑换）
+	if err := store.SaveCardplatformCDKCode(newIt.ID, newCode, newPrefix, plan, newIt.FeeAmountMinor, country); err != nil {
+		manual("新码已生成，但库存保存失败")
+		return
+	}
 	if err := cli.DisableCDK(c.Request.Context(), upstreamID); err != nil {
-		log.Printf("[agent-exchange] disable old cdk %d failed: %v (new already issued id=%d)", upstreamID, err, newIt.ID)
-		// 不回滚新码；记录警告
-	} else {
-		_ = db.UpdateCardplatformCDKStatus(upstreamID, "disabled")
+		manual("新码已生成，但旧码未能禁用，暂不交付新码")
+		return
+	}
+	if err := store.UpdateCardplatformCDKStatus(upstreamID, "disabled"); err != nil {
+		manual("旧码已禁用，但本地状态保存失败")
+		return
+	}
+	if err := store.RecordAgentCDKExchange(codeHash, upstreamID, newIt.ID, prefix, newPrefix, plan, orderID, status, ip); err != nil {
+		manual("补发结果保存失败")
+		return
+	}
+	if err := store.CompleteAgentExchange(codeHash); err != nil {
+		manual("补发完成状态保存失败")
+		return
 	}
 
-	_ = db.RecordAgentCDKExchange(codeHash, upstreamID, newIt.ID, prefix, newPrefix, plan, orderID, status, ip)
 	db.WriteAudit("agent-swap", "agent_cdk_exchange",
-		"old="+strconv.FormatInt(upstreamID, 10)+" new="+strconv.FormatInt(newIt.ID, 10)+" plan="+plan+" region="+country+" order="+strconv.FormatInt(orderID, 10),
+		"account_id="+strconv.FormatInt(accountID, 10)+" old="+strconv.FormatInt(upstreamID, 10)+" new="+strconv.FormatInt(newIt.ID, 10)+" plan="+plan+" region="+country+" order="+strconv.FormatInt(orderID, 10),
 		ip)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -324,7 +399,7 @@ func upstreamCDKRegion(c *gin.Context, cli *cardplatform.Client, upstreamID int6
 	for _, it := range res.List {
 		if it.ID == upstreamID {
 			country := strings.ToUpper(strings.TrimSpace(it.PaymentCountry))
-			_ = db.UpdateCardplatformCDKRegion(upstreamID, country)
+			_ = db.ForAccount(cli.AccountID()).UpdateCardplatformCDKRegion(upstreamID, country)
 			return country, true
 		}
 	}

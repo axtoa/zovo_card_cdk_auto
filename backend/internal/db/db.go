@@ -282,6 +282,12 @@ func createTables() error {
 	if err := migrateCardplatformCDKRegionCol(); err != nil {
 		return fmt.Errorf("migrate cardplatform CDK region: %w", err)
 	}
+	if err := MigrateCardAccounts(); err != nil {
+		return err
+	}
+	if err := migrateAgentExchangeAttempts(); err != nil {
+		return err
+	}
 	if err := ensureDefaultAdmin(); err != nil {
 		return err
 	}
@@ -636,6 +642,7 @@ func RandomPassword(n int) string {
 
 // WebhookEvent 入库行
 type WebhookEvent struct {
+	AccountID int64
 	ID        int64
 	EventType string
 	IdemKey   string
@@ -659,7 +666,7 @@ func ListWebhookEvents(limit int) ([]WebhookEvent, error) {
 		limit = 50
 	}
 	rows, err := DB.Query(`
-		SELECT id, COALESCE(event_type,''), idem_key, payload, COALESCE(created_at,'')
+		SELECT account_id,id, COALESCE(event_type,''), idem_key, payload, COALESCE(created_at,'')
 		FROM webhook_events ORDER BY id DESC LIMIT ?
 	`, limit)
 	if err != nil {
@@ -669,7 +676,7 @@ func ListWebhookEvents(limit int) ([]WebhookEvent, error) {
 	var out []WebhookEvent
 	for rows.Next() {
 		var e WebhookEvent
-		if err := rows.Scan(&e.ID, &e.EventType, &e.IdemKey, &e.Payload, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.AccountID, &e.ID, &e.EventType, &e.IdemKey, &e.Payload, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -691,14 +698,29 @@ func BindCDKRedemptionToken(cdkCode, redemptionToken string) error {
 	if code == "" || tok == "" {
 		return nil
 	}
-	_, err := DB.Exec(`
+	tx, err := DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO cdk_token_origins(token,code) VALUES(?,?) ON CONFLICT(token) DO UPDATE SET code=excluded.code WHERE cdk_token_origins.code=excluded.code`, tok, code)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("token already belongs to another code")
+	}
+	_, err = tx.Exec(`
 		INSERT INTO cdk_session_bindings (cdk_code, session_payload, redemption_token, updated_at)
 		VALUES (?, '', ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(cdk_code) DO UPDATE SET
 			redemption_token = excluded.redemption_token,
 			updated_at = CURRENT_TIMESTAMP
 	`, code, tok)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // BindCDKSession 预检/兑换时写入 session（可按码或 redemption_token 关联）
@@ -810,8 +832,8 @@ func FindCodeByRedemptionToken(redemptionToken string) (string, error) {
 	}
 	var code string
 	err := DB.QueryRow(`
-		SELECT cdk_code FROM cdk_session_bindings
-		WHERE redemption_token = ?
+		SELECT code FROM cdk_token_origins
+		WHERE token = ?
 		LIMIT 1
 	`, tok).Scan(&code)
 	if err == sql.ErrNoRows {
@@ -886,12 +908,15 @@ func legacyUUIDCode(planType string, id int64) string {
 }
 
 // SaveCardplatformCDKCode 把完整码写入本站 SQLite（发码 / 从卡台同步 / 回填）。
-func SaveCardplatformCDKCode(upstreamID int64, code, prefix, plan string, feeMinor int64, country ...string) error {
-	return SaveCardplatformCDKCodeWithStatus(upstreamID, code, prefix, plan, feeMinor, "unused", country...)
+func (s AccountStore) SaveCardplatformCDKCode(upstreamID int64, code, prefix, plan string, feeMinor int64, country ...string) error {
+	return s.SaveCardplatformCDKCodeWithStatus(upstreamID, code, prefix, plan, feeMinor, "unused", country...)
 }
 
 // SaveCardplatformCDKCodeWithStatus 同上，并写入/更新 status。
-func SaveCardplatformCDKCodeWithStatus(upstreamID int64, code, prefix, plan string, feeMinor int64, status string, country ...string) error {
+func (s AccountStore) SaveCardplatformCDKCodeWithStatus(upstreamID int64, code, prefix, plan string, feeMinor int64, status string, country ...string) error {
+	if s.AccountID <= 0 {
+		return fmt.Errorf("account required")
+	}
 	if DB == nil {
 		return fmt.Errorf("db not init")
 	}
@@ -914,9 +939,9 @@ func SaveCardplatformCDKCodeWithStatus(upstreamID int64, code, prefix, plan stri
 	if len(country) > 0 {
 		region = strings.ToUpper(strings.TrimSpace(country[0]))
 	}
-	_, err := DB.Exec(`
-		INSERT INTO cardplatform_cdk_codes (upstream_id, code, code_prefix, plan, fee_amount_minor, status, payment_country, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	res, err := DB.Exec(`
+		INSERT INTO cardplatform_cdk_codes (account_id, upstream_id, code, code_prefix, plan, fee_amount_minor, status, payment_country, created_at)
+		VALUES (`+s.sqlID()+`, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(code) DO UPDATE SET
 			upstream_id = excluded.upstream_id,
 			code_prefix = excluded.code_prefix,
@@ -924,15 +949,18 @@ func SaveCardplatformCDKCodeWithStatus(upstreamID int64, code, prefix, plan stri
 			fee_amount_minor = CASE WHEN excluded.fee_amount_minor > 0 THEN excluded.fee_amount_minor ELSE cardplatform_cdk_codes.fee_amount_minor END,
 			status = CASE WHEN excluded.status != '' THEN excluded.status ELSE cardplatform_cdk_codes.status END,
 			payment_country = COALESCE(excluded.payment_country, cardplatform_cdk_codes.payment_country)
-	`, upstreamID, code, prefix, plan, feeMinor, status, region)
+	 WHERE cardplatform_cdk_codes.account_id = excluded.account_id`, upstreamID, code, prefix, plan, feeMinor, status, region)
 	if err != nil {
 		return fmt.Errorf("save cardplatform cdk: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("卡密已属于其他账号，拒绝重新归属")
 	}
 	return nil
 }
 
 // UpdateCardplatformCDKStatus 按上游 id 更新本站缓存的状态（禁用/解禁后刷新列表）。
-func UpdateCardplatformCDKStatus(upstreamID int64, status string) error {
+func (s AccountStore) UpdateCardplatformCDKStatus(upstreamID int64, status string) error {
 	if DB == nil || upstreamID <= 0 {
 		return nil
 	}
@@ -940,17 +968,17 @@ func UpdateCardplatformCDKStatus(upstreamID int64, status string) error {
 	if status == "" {
 		return nil
 	}
-	_, err := DB.Exec(`UPDATE cardplatform_cdk_codes SET status = ? WHERE upstream_id = ?`, status, upstreamID)
+	_, err := DB.Exec(`UPDATE cardplatform_cdk_codes SET status = ? WHERE account_id = `+s.sqlID()+` AND upstream_id = ?`, status, upstreamID)
 	return err
 }
 
 // GetCardplatformCDKStatus 读本站缓存状态；无记录返回空串。
-func GetCardplatformCDKStatus(upstreamID int64) string {
+func (s AccountStore) GetCardplatformCDKStatus(upstreamID int64) string {
 	if DB == nil || upstreamID <= 0 {
 		return ""
 	}
 	var st string
-	err := DB.QueryRow(`SELECT COALESCE(status,'') FROM cardplatform_cdk_codes WHERE upstream_id = ? LIMIT 1`, upstreamID).Scan(&st)
+	err := DB.QueryRow(`SELECT COALESCE(status,'') FROM cardplatform_cdk_codes WHERE account_id = `+s.sqlID()+` AND upstream_id = ? LIMIT 1`, upstreamID).Scan(&st)
 	if err != nil {
 		return ""
 	}
@@ -958,12 +986,12 @@ func GetCardplatformCDKStatus(upstreamID int64) string {
 }
 
 // CountCardplatformCDKCodes 本站已存完整码数量（运维/健康检查）。
-func CountCardplatformCDKCodes() int {
+func (s AccountStore) CountCardplatformCDKCodes() int {
 	if DB == nil {
 		return 0
 	}
 	var n int
-	_ = DB.QueryRow(`SELECT COUNT(*) FROM cardplatform_cdk_codes`).Scan(&n)
+	_ = DB.QueryRow(`SELECT COUNT(*) FROM cardplatform_cdk_codes WHERE account_id = ` + s.sqlID()).Scan(&n)
 	return n
 }
 
@@ -981,15 +1009,15 @@ type StoredCDKCode struct {
 
 // ListCardplatformStoredCDKCodes 列出本站 SQLite 中的完整码（可按 plan / q / status 过滤）。
 // limit<=0 时默认 5000，硬顶 10000。
-func ListCardplatformStoredCDKCodes(plan, q string, limit int) ([]StoredCDKCode, error) {
-	return ListCardplatformStoredCDKCodesFilter(plan, q, "", limit)
+func (s AccountStore) ListCardplatformStoredCDKCodes(plan, q string, limit int) ([]StoredCDKCode, error) {
+	return s.ListCardplatformStoredCDKCodesFilter(plan, q, "", limit)
 }
 
-func cardplatformStoredWhere(plan, q, status string) (where string, args []any) {
+func (s AccountStore) cardplatformStoredWhere(plan, q, status string) (where string, args []any) {
 	plan = strings.TrimSpace(plan)
 	q = strings.TrimSpace(q)
 	status = strings.TrimSpace(strings.ToLower(status))
-	where = ` WHERE 1=1`
+	where = ` WHERE account_id = ` + s.sqlID()
 	if plan != "" {
 		where += ` AND plan = ?`
 		args = append(args, plan)
@@ -1005,7 +1033,7 @@ func cardplatformStoredWhere(plan, q, status string) (where string, args []any) 
 			OR CAST(upstream_id AS TEXT) = ?
 			OR upstream_id IN (
 				SELECT upstream_id FROM cardplatform_cdk_notes
-				WHERE IFNULL(note, '') LIKE ? COLLATE NOCASE
+				WHERE account_id = ` + s.sqlID() + ` AND IFNULL(note, '') LIKE ? COLLATE NOCASE
 			)
 		)`
 		like := "%" + q + "%"
@@ -1015,26 +1043,26 @@ func cardplatformStoredWhere(plan, q, status string) (where string, args []any) 
 }
 
 // CountCardplatformStoredCDKCodesFilter 符合过滤条件的本站完整码总数。
-func CountCardplatformStoredCDKCodesFilter(plan, q, status string) (int, error) {
+func (s AccountStore) CountCardplatformStoredCDKCodesFilter(plan, q, status string) (int, error) {
 	if DB == nil {
 		return 0, fmt.Errorf("db not init")
 	}
-	where, args := cardplatformStoredWhere(plan, q, status)
+	where, args := s.cardplatformStoredWhere(plan, q, status)
 	var n int
 	err := DB.QueryRow(`SELECT COUNT(*) FROM cardplatform_cdk_codes`+where, args...).Scan(&n)
 	return n, err
 }
 
 // ListCardplatformStoredCDKCodesFilter 可按 status 过滤（旧接口：仅 LIMIT，无 OFFSET）。
-func ListCardplatformStoredCDKCodesFilter(plan, q, status string, limit int) ([]StoredCDKCode, error) {
-	list, _, err := ListCardplatformStoredCDKCodesPage(plan, q, status, 1, limit)
+func (s AccountStore) ListCardplatformStoredCDKCodesFilter(plan, q, status string, limit int) ([]StoredCDKCode, error) {
+	list, _, err := s.ListCardplatformStoredCDKCodesPage(plan, q, status, 1, limit)
 	return list, err
 }
 
 // ListCardplatformStoredCDKCodesPage 分页列出本站完整码。
 // page 从 1 起；pageSize<=0 时默认 20；单页硬顶 500（列表），导出请用更大 limit 的旧路径或 pageSize 上限 10000。
 // 返回 list + 过滤后 total。
-func ListCardplatformStoredCDKCodesPage(plan, q, status string, page, pageSize int) ([]StoredCDKCode, int, error) {
+func (s AccountStore) ListCardplatformStoredCDKCodesPage(plan, q, status string, page, pageSize int) ([]StoredCDKCode, int, error) {
 	if DB == nil {
 		return nil, 0, fmt.Errorf("db not init")
 	}
@@ -1047,11 +1075,11 @@ func ListCardplatformStoredCDKCodesPage(plan, q, status string, page, pageSize i
 	if pageSize > 10000 {
 		pageSize = 10000
 	}
-	total, err := CountCardplatformStoredCDKCodesFilter(plan, q, status)
+	total, err := s.CountCardplatformStoredCDKCodesFilter(plan, q, status)
 	if err != nil {
 		return nil, 0, err
 	}
-	where, args := cardplatformStoredWhere(plan, q, status)
+	where, args := s.cardplatformStoredWhere(plan, q, status)
 	offset := (page - 1) * pageSize
 	sql := `
 		SELECT COALESCE(upstream_id,0), code, COALESCE(code_prefix,''), COALESCE(plan,''),
@@ -1084,26 +1112,37 @@ func ListCardplatformStoredCDKCodesPage(plan, q, status string, page, pageSize i
 }
 
 // LookupCardplatformCDKCode 按上游 id 或 prefix 取完整码。
-func LookupCardplatformCDKCode(upstreamID int64, prefix string) (string, bool) {
-	if DB == nil {
+func (s AccountStore) LookupCardplatformCDKCode(upstreamID int64, prefix string) (string, bool) {
+	if DB == nil || s.AccountID <= 0 {
 		return "", false
 	}
-	prefix = strings.TrimSpace(prefix)
-	var code string
+	var rows *sql.Rows
+	var err error
 	if upstreamID > 0 {
-		err := DB.QueryRow(`SELECT code FROM cardplatform_cdk_codes WHERE upstream_id = ? ORDER BY created_at DESC LIMIT 1`, upstreamID).Scan(&code)
-		if err == nil && strings.TrimSpace(code) != "" {
-			return strings.TrimSpace(code), true
+		rows, err = DB.Query(`SELECT code FROM cardplatform_cdk_codes WHERE account_id=? AND upstream_id=? LIMIT 2`, s.AccountID, upstreamID)
+	} else {
+		prefix = strings.TrimSpace(prefix)
+		if prefix == "" {
+			return "", false
 		}
+		rows, err = DB.Query(`SELECT code FROM cardplatform_cdk_codes WHERE account_id=? AND (code_prefix=? OR substr(code,1,length(?))=?) LIMIT 2`, s.AccountID, prefix, prefix, prefix)
 	}
-	if prefix != "" {
-		err := DB.QueryRow(`SELECT code FROM cardplatform_cdk_codes WHERE code_prefix = ? OR code LIKE ? ORDER BY created_at DESC LIMIT 1`,
-			prefix, prefix+"%").Scan(&code)
-		if err == nil && strings.TrimSpace(code) != "" {
-			return strings.TrimSpace(code), true
+	if err != nil {
+		return "", false
+	}
+	defer rows.Close()
+	var code string
+	count := 0
+	for rows.Next() {
+		if err = rows.Scan(&code); err != nil {
+			return "", false
 		}
+		count++
 	}
-	return "", false
+	if rows.Err() != nil || count != 1 {
+		return "", false
+	}
+	return strings.TrimSpace(code), strings.TrimSpace(code) != ""
 }
 
 // ---- CDK 备注（本站）----
@@ -1111,7 +1150,10 @@ func LookupCardplatformCDKCode(upstreamID int64, prefix string) (string, bool) {
 const maxCDKNoteLen = 200
 
 // SetCardplatformCDKNote 写入/更新备注；note 空串表示清空。
-func SetCardplatformCDKNote(upstreamID int64, note string) error {
+func (s AccountStore) SetCardplatformCDKNote(upstreamID int64, note string) error {
+	if s.AccountID <= 0 {
+		return fmt.Errorf("account required")
+	}
 	if DB == nil {
 		return fmt.Errorf("db not init")
 	}
@@ -1123,13 +1165,13 @@ func SetCardplatformCDKNote(upstreamID int64, note string) error {
 		return fmt.Errorf("备注最多 %d 字", maxCDKNoteLen)
 	}
 	if note == "" {
-		_, err := DB.Exec(`DELETE FROM cardplatform_cdk_notes WHERE upstream_id = ?`, upstreamID)
+		_, err := DB.Exec(`DELETE FROM cardplatform_cdk_notes WHERE account_id = `+s.sqlID()+` AND upstream_id = ?`, upstreamID)
 		return err
 	}
 	_, err := DB.Exec(`
-		INSERT INTO cardplatform_cdk_notes (upstream_id, note, updated_at)
-		VALUES (?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(upstream_id) DO UPDATE SET
+		INSERT INTO cardplatform_cdk_notes (account_id, upstream_id, note, updated_at)
+		VALUES (`+s.sqlID()+`, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(account_id, upstream_id) DO UPDATE SET
 			note = excluded.note,
 			updated_at = CURRENT_TIMESTAMP
 	`, upstreamID, note)
@@ -1137,7 +1179,7 @@ func SetCardplatformCDKNote(upstreamID int64, note string) error {
 }
 
 // ClearCardplatformCDKNotes 批量清空备注。
-func ClearCardplatformCDKNotes(ids []int64) (int, error) {
+func (s AccountStore) ClearCardplatformCDKNotes(ids []int64) (int, error) {
 	if DB == nil {
 		return 0, fmt.Errorf("db not init")
 	}
@@ -1146,7 +1188,7 @@ func ClearCardplatformCDKNotes(ids []int64) (int, error) {
 		if id <= 0 {
 			continue
 		}
-		res, err := DB.Exec(`DELETE FROM cardplatform_cdk_notes WHERE upstream_id = ?`, id)
+		res, err := DB.Exec(`DELETE FROM cardplatform_cdk_notes WHERE account_id = `+s.sqlID()+` AND upstream_id = ?`, id)
 		if err != nil {
 			return n, err
 		}
@@ -1158,7 +1200,7 @@ func ClearCardplatformCDKNotes(ids []int64) (int, error) {
 }
 
 // BatchSetCardplatformCDKNotes 批量写入同一备注；note 空则清空。
-func BatchSetCardplatformCDKNotes(ids []int64, note string) (ok int, failed []int64, err error) {
+func (s AccountStore) BatchSetCardplatformCDKNotes(ids []int64, note string) (ok int, failed []int64, err error) {
 	if DB == nil {
 		return 0, nil, fmt.Errorf("db not init")
 	}
@@ -1171,7 +1213,7 @@ func BatchSetCardplatformCDKNotes(ids []int64, note string) (ok int, failed []in
 			failed = append(failed, id)
 			continue
 		}
-		if e := SetCardplatformCDKNote(id, note); e != nil {
+		if e := s.SetCardplatformCDKNote(id, note); e != nil {
 			failed = append(failed, id)
 			continue
 		}
@@ -1181,17 +1223,17 @@ func BatchSetCardplatformCDKNotes(ids []int64, note string) (ok int, failed []in
 }
 
 // GetCardplatformCDKNote 单条备注。
-func GetCardplatformCDKNote(upstreamID int64) string {
+func (s AccountStore) GetCardplatformCDKNote(upstreamID int64) string {
 	if DB == nil || upstreamID <= 0 {
 		return ""
 	}
 	var note string
-	_ = DB.QueryRow(`SELECT COALESCE(note,'') FROM cardplatform_cdk_notes WHERE upstream_id = ?`, upstreamID).Scan(&note)
+	_ = DB.QueryRow(`SELECT COALESCE(note,'') FROM cardplatform_cdk_notes WHERE account_id = `+s.sqlID()+` AND upstream_id = ?`, upstreamID).Scan(&note)
 	return strings.TrimSpace(note)
 }
 
 // MapCardplatformCDKNotes 批量取备注 map[upstream_id]note。
-func MapCardplatformCDKNotes(ids []int64) map[int64]string {
+func (s AccountStore) MapCardplatformCDKNotes(ids []int64) map[int64]string {
 	out := map[int64]string{}
 	if DB == nil || len(ids) == 0 {
 		return out
@@ -1219,7 +1261,7 @@ func MapCardplatformCDKNotes(ids []int64) map[int64]string {
 		ph[i] = "?"
 		args[i] = id
 	}
-	q := `SELECT upstream_id, COALESCE(note,'') FROM cardplatform_cdk_notes WHERE upstream_id IN (` + strings.Join(ph, ",") + `)`
+	q := `SELECT upstream_id, COALESCE(note,'') FROM cardplatform_cdk_notes WHERE account_id = ` + s.sqlID() + ` AND upstream_id IN (` + strings.Join(ph, ",") + `)`
 	rows, err := DB.Query(q, args...)
 	if err != nil {
 		return out
@@ -1267,23 +1309,17 @@ func LookupStoredCDKByCode(code string) (upstreamID int64, plan, prefix, status 
 	return upstreamID, plan, prefix, status, true
 }
 
-func AgentCDKAlreadyExchanged(codeHash string) bool {
-	if DB == nil || codeHash == "" {
-		return false
+func (s AccountStore) RecordAgentCDKExchange(oldHash string, oldID, newID int64, oldPrefix, newPrefix, plan string, orderID int64, orderStatus, ip string) error {
+	if s.AccountID <= 0 {
+		return fmt.Errorf("account required")
 	}
-	var n int
-	_ = DB.QueryRow(`SELECT COUNT(*) FROM agent_cdk_exchanges WHERE old_code_hash = ?`, codeHash).Scan(&n)
-	return n > 0
-}
-
-func RecordAgentCDKExchange(oldHash string, oldID, newID int64, oldPrefix, newPrefix, plan string, orderID int64, orderStatus, ip string) error {
 	if DB == nil {
 		return fmt.Errorf("db not init")
 	}
 	_, err := DB.Exec(`
 		INSERT INTO agent_cdk_exchanges
-		(old_code_hash, old_upstream_id, new_upstream_id, old_code_prefix, new_code_prefix, plan, order_id, order_status, ip, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		(account_id, old_code_hash, old_upstream_id, new_upstream_id, old_code_prefix, new_code_prefix, plan, order_id, order_status, ip, created_at)
+		VALUES (`+s.sqlID()+`, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 	`, oldHash, oldID, newID, oldPrefix, newPrefix, plan, orderID, orderStatus, ip)
 	return err
 }
@@ -1375,14 +1411,14 @@ func SetCardSelectionRules(rules []CardSelectionRule) error {
 }
 
 // GetPlanStatusCache 返回所有产品状态缓存（slice，供列表展示）。
-func GetPlanStatusCache() ([]PlanStatusCache, error) {
+func (s AccountStore) GetPlanStatusCache() ([]PlanStatusCache, error) {
 	if DB == nil {
 		return nil, fmt.Errorf("db not ready")
 	}
 	rows, err := DB.Query(`
 		SELECT plan_key, COALESCE(label,''), online,
 		       COALESCE(service_fee_usd_minor,0), COALESCE(synced_at,'')
-		FROM plan_status_cache ORDER BY plan_key
+		FROM plan_status_cache WHERE account_id = ` + s.sqlID() + ` ORDER BY plan_key
 	`)
 	if err != nil {
 		return nil, err
@@ -1404,8 +1440,8 @@ func GetPlanStatusCache() ([]PlanStatusCache, error) {
 }
 
 // GetPlanStatusCacheMap 返回 plan_key → PlanStatusCache 的 map，方便 O(1) 查找。
-func GetPlanStatusCacheMap() (map[string]PlanStatusCache, error) {
-	list, err := GetPlanStatusCache()
+func (s AccountStore) GetPlanStatusCacheMap() (map[string]PlanStatusCache, error) {
+	list, err := s.GetPlanStatusCache()
 	if err != nil {
 		return nil, err
 	}
@@ -1417,7 +1453,10 @@ func GetPlanStatusCacheMap() (map[string]PlanStatusCache, error) {
 }
 
 // UpsertPlanStatus 插入或更新一条产品状态缓存。
-func UpsertPlanStatus(planKey, label string, online bool, feeMinor int64) error {
+func (s AccountStore) UpsertPlanStatus(planKey, label string, online bool, feeMinor int64) error {
+	if s.AccountID <= 0 {
+		return fmt.Errorf("account required")
+	}
 	if DB == nil {
 		return fmt.Errorf("db not ready")
 	}
@@ -1426,9 +1465,9 @@ func UpsertPlanStatus(planKey, label string, online bool, feeMinor int64) error 
 		onlineInt = 1
 	}
 	_, err := DB.Exec(`
-		INSERT INTO plan_status_cache (plan_key, label, online, service_fee_usd_minor, synced_at)
-		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(plan_key) DO UPDATE SET
+		INSERT INTO plan_status_cache (account_id, plan_key, label, online, service_fee_usd_minor, synced_at)
+		VALUES (`+s.sqlID()+`, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(account_id, plan_key) DO UPDATE SET
 			label = excluded.label,
 			online = excluded.online,
 			service_fee_usd_minor = excluded.service_fee_usd_minor,
@@ -1454,7 +1493,10 @@ type CardProductCache struct {
 }
 
 // UpsertCardProduct 插入或更新一条产品缓存。
-func UpsertCardProduct(p CardProductCache) error {
+func (s AccountStore) UpsertCardProduct(p CardProductCache) error {
+	if s.AccountID <= 0 {
+		return fmt.Errorf("account required")
+	}
 	if DB == nil {
 		return fmt.Errorf("db not ready")
 	}
@@ -1465,10 +1507,10 @@ func UpsertCardProduct(p CardProductCache) error {
 	binHeadsJSON, _ := json.Marshal(p.BinHeads)
 	_, err := DB.Exec(`
 		INSERT INTO card_product_cache
-			(product_code, issuer, bin, network, issuing_area, scene, card_group,
+			(account_id, product_code, issuer, bin, network, issuing_area, scene, card_group,
 			 description, bin_heads, enabled, suspended_at, synced_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(product_code) DO UPDATE SET
+		VALUES (`+s.sqlID()+`, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(account_id, product_code) DO UPDATE SET
 			issuer = excluded.issuer,
 			bin = excluded.bin,
 			network = excluded.network,
@@ -1493,14 +1535,14 @@ func UpsertCardProduct(p CardProductCache) error {
 // 选卡规则里仍引用它时，规则照常显示为离线（找不到产品即离线）。
 //
 // present 为空时不动：防止一次异常的空响应把整个缓存清掉。
-func PruneCardProductsExcept(present map[string]bool) (int, error) {
+func (s AccountStore) PruneCardProductsExcept(present map[string]bool) (int, error) {
 	if DB == nil {
 		return 0, fmt.Errorf("db not ready")
 	}
 	if len(present) == 0 {
 		return 0, nil
 	}
-	rows, err := DB.Query(`SELECT product_code FROM card_product_cache`)
+	rows, err := DB.Query(`SELECT product_code FROM card_product_cache WHERE account_id = ` + s.sqlID())
 	if err != nil {
 		return 0, err
 	}
@@ -1520,7 +1562,7 @@ func PruneCardProductsExcept(present map[string]bool) (int, error) {
 	}
 	n := 0
 	for _, code := range stale {
-		res, err := DB.Exec(`DELETE FROM card_product_cache WHERE product_code = ?`, code)
+		res, err := DB.Exec(`DELETE FROM card_product_cache WHERE account_id = `+s.sqlID()+` AND product_code = ?`, code)
 		if err != nil {
 			return n, err
 		}
@@ -1532,7 +1574,7 @@ func PruneCardProductsExcept(present map[string]bool) (int, error) {
 }
 
 // GetCardProducts 返回所有产品缓存（在线优先，再按 product_code）。
-func GetCardProducts() ([]CardProductCache, error) {
+func (s AccountStore) GetCardProducts() ([]CardProductCache, error) {
 	if DB == nil {
 		return nil, fmt.Errorf("db not ready")
 	}
@@ -1541,7 +1583,7 @@ func GetCardProducts() ([]CardProductCache, error) {
 		       COALESCE(issuing_area,''), COALESCE(scene,''), COALESCE(card_group,''),
 		       COALESCE(description,''), COALESCE(bin_heads,'[]'), enabled,
 		       COALESCE(suspended_at,''), COALESCE(synced_at,'')
-		FROM card_product_cache
+		FROM card_product_cache WHERE account_id = ` + s.sqlID() + `
 		ORDER BY enabled DESC, network, product_code
 	`)
 	if err != nil {

@@ -329,14 +329,15 @@
 import { useI18n } from 'vue-i18n'
 const { t } = useI18n()
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { authFetch } from '../../lib/api'
+import { useAccountFetch } from '../../lib/cardAccounts'
+const { authFetch, accountId } = useAccountFetch()
 import { dialog } from '../../lib/dialog'
 import { copyToClipboard } from '../../lib/clipboard'
 import { isCardAttachPlan } from '../../lib/plan'
 
-const RECENT_KEY = 'cdk_recent_issued_v1'
+const RECENT_KEY = `cdk_recent_issued_v2:${accountId}`
 /** 浏览器兜底缓存（历史本机数据）；主存储已改为服务器 SQLite */
-const CODE_CACHE_KEY = 'cdk_full_code_cache_v1'
+const CODE_CACHE_KEY = `cdk_full_code_cache_v2:${accountId}`
 /** 卡台完整码形如 GPTD-xxxxxxxxxxxx-xxxxxxxxxxxx-xxxxxxxxxxxx（约 43 字符） */
 const FULL_CODE_MIN_LEN = 20
 const ISSUE_MAX = 200
@@ -1026,12 +1027,10 @@ function lookupFullCode(row: any): string {
   const id = row.id != null ? String(row.id) : ''
   const prefix = String(row.code_prefix || '').trim()
   const cache = codeCache.value
-  if (id && cache[`id:${id}`]?.code) return cache[`id:${id}`].code
-  if (prefix && cache[`pfx:${prefix}`]?.code) return cache[`pfx:${prefix}`].code
+  if (id) return cache[`id:${id}`]?.code || ''
   if (prefix) {
-    for (const v of Object.values(cache)) {
-      if (v?.code && v.code.startsWith(prefix)) return v.code
-    }
+    const matches = new Set(Object.values(cache).filter(v => v?.code?.startsWith(prefix)).map(v => v.code))
+    if (matches.size === 1) return [...matches][0]
   }
   return ''
 }
@@ -1184,11 +1183,11 @@ async function loadMeta() {
       authFetch(`/api/v1/admin/cardplatform/plans?product=${directProduct.value}`),
       authFetch('/api/v1/admin/cardplatform/balance'),
       authFetch('/api/v1/admin/network/egress'),
-      authFetch('/api/v1/admin/settings'),
+      authFetch('/api/v1/admin/cardplatform/accounts'),
     ])
     if (sr.ok) {
       const s = await sr.json()
-      configured.value = !!s.card_api_key_configured
+      configured.value = !!s.accounts?.find((a: any) => a.id === accountId)?.api_key_configured
     }
     if (er.ok) {
       const e = await er.json()
@@ -1231,7 +1230,11 @@ async function loadMeta() {
     }
     if (br.ok) {
       const b = await br.json()
-      balanceText.value = String(b.spendable_balance ?? b.balance ?? '')
+      balanceText.value = String(b.spendable_balance ?? '')
+    } else {
+      balanceText.value = ''
+      const b = await br.json().catch(() => ({}))
+      metaError.value = [metaError.value, b.error || '余额查询失败'].filter(Boolean).join('；')
     }
   } catch (e: any) {
     metaError.value = e?.message || '网络错误'

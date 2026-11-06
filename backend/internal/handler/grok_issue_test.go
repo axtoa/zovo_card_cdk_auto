@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tuzi/cdk-recharge-system/internal/cardplatform"
 	"github.com/tuzi/cdk-recharge-system/internal/db"
 )
 
@@ -22,7 +23,7 @@ func TestGrokIssueUsesGrokCatalogueAndPrefixedPlan(t *testing.T) {
 	old := db.DB
 	db.DB = c
 	t.Cleanup(func() { db.DB = old; c.Close() })
-	for _, q := range []string{`CREATE TABLE site_settings(key TEXT PRIMARY KEY,value TEXT,updated_at DATETIME)`, `CREATE TABLE cardplatform_cdk_codes(upstream_id INTEGER,code TEXT UNIQUE NOT NULL,code_prefix TEXT,plan TEXT,fee_amount_minor INTEGER,status TEXT,payment_country TEXT,created_at DATETIME)`} {
+	for _, q := range []string{`CREATE TABLE site_settings(key TEXT PRIMARY KEY,value TEXT,updated_at DATETIME)`, `CREATE TABLE cardplatform_cdk_codes(account_id INTEGER NOT NULL DEFAULT 1,upstream_id INTEGER,code TEXT UNIQUE NOT NULL,code_prefix TEXT,plan TEXT,fee_amount_minor INTEGER,status TEXT,payment_country TEXT,created_at DATETIME)`} {
 		if _, err = c.Exec(q); err != nil {
 			t.Fatal(err)
 		}
@@ -60,6 +61,10 @@ func TestGrokIssueUsesGrokCatalogueAndPrefixedPlan(t *testing.T) {
 	}
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(cardplatform.WithAccount(c.Request.Context(), db.CardAccount{ID: 1, APIKey: "fixture-key"}))
+		c.Next()
+	})
 	r.POST("/issue", CardPlatformIssueCDKs)
 	for _, body := range []string{
 		`{"plan":"premium_monthly","product":"grok","count":1,"funding_confirmed":true,"payment_country":"PH"}`,
@@ -81,10 +86,10 @@ func TestGrokIssueUsesGrokCatalogueAndPrefixedPlan(t *testing.T) {
 
 func TestIssueProductKeepsGPTDefault(t *testing.T) {
 	cases := map[[2]string]string{
-		{"", "plus"}: "gpt", {"", "pro_20x_renew"}: "gpt", {"", "basic_monthly"}: "x",
+		{"", "plus"}: "gpt", {"", "pro_20x_renew"}: "gpt", {"", "plus_monthly"}: "x",
 		{"", "heavy_yearly"}: "grok", {"gpt", "plus"}: "gpt", {"bogus", "plus"}: "gpt",
 		// 裸 premium_* 同时是 X 和 Grok 的键：没有 product 时归 X；带 grok_ 前缀才是 Grok
-		{"", "premium_monthly"}: "x", {"", "grok_premium_monthly"}: "grok", {"", "super_monthly"}: "grok",
+		{"", "premium_monthly"}: "x", {"", "grok_premium_monthly"}: "grok", {"", "super_monthly"}: "x",
 		{"grok", "premium_monthly"}: "grok",
 	}
 	for in, want := range cases {

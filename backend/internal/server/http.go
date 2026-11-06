@@ -171,7 +171,7 @@ func setupRoutes(r *gin.Engine) {
 		stats := api.Group("/stats")
 		stats.Use(JWTAuthMiddleware(), AdminAuthMiddleware())
 		{
-			stats.GET("/system", handler.GetSystemStats)
+			stats.GET("/system", handler.RequireCardAccount, handler.GetSystemStats)
 		}
 
 		// Admin routes
@@ -184,25 +184,28 @@ func setupRoutes(r *gin.Engine) {
 			admin.GET("/system/update/status", handler.AdminSystemUpdateStatus)
 			admin.POST("/system/update", handler.AdminSystemUpdate)
 
+			admin.GET("/cardplatform/accounts", handler.AdminListCardAccounts)
+			admin.POST("/cardplatform/accounts", handler.AdminSaveCardAccount)
+			admin.PUT("/cardplatform/accounts/:id", handler.AdminSaveCardAccount)
 			// 卡台 Open API：实时价格 / 余额 / 发码 / 列码 / CDK 订单
-			admin.GET("/cardplatform/ping", handler.CardPlatformPing)
-			admin.GET("/cardplatform/plans", handler.CardPlatformPlans)
-			admin.GET("/cardplatform/balance", handler.CardPlatformBalance)
-			admin.GET("/cardplatform/cdks", handler.CardPlatformListCDKs)
-			admin.GET("/cardplatform/cdks/stored", handler.CardPlatformListStoredCDKs)
-			admin.POST("/cardplatform/cdks", handler.CardPlatformIssueCDKs)
-			admin.POST("/cardplatform/cdks/sync", handler.CardPlatformSyncUpstreamCDKs)
-			admin.POST("/cardplatform/cdks/store", handler.CardPlatformStoreCDKCodes)
-			admin.POST("/cardplatform/cdks/batch-disable", handler.CardPlatformBatchDisableCDKs)
-			admin.POST("/cardplatform/cdks/batch-enable", handler.CardPlatformBatchEnableCDKs)
-			admin.POST("/cardplatform/cdks/batch-note", handler.CardPlatformBatchSetCDKNote)
-			admin.POST("/cardplatform/cdks/batch-clear-note", handler.CardPlatformBatchClearCDKNote)
-			admin.PUT("/cardplatform/cdks/:id/note", handler.CardPlatformSetCDKNote)
-			admin.POST("/cardplatform/cdks/:id/disable", handler.CardPlatformDisableCDK)
-			admin.POST("/cardplatform/cdks/:id/enable", handler.CardPlatformEnableCDK)
-			admin.GET("/cardplatform/cdk-orders", handler.CardPlatformListCDKOrders)
-			admin.GET("/cardplatform/cdk-orders/:id", handler.CardPlatformGetCDKOrder)
-			admin.DELETE("/cardplatform/cards/:id", handler.CardPlatformDeleteCard)
+			admin.GET("/cardplatform/ping", handler.RequireCardAccount, handler.CardPlatformPing)
+			admin.GET("/cardplatform/plans", handler.RequireCardAccount, handler.CardPlatformPlans)
+			admin.GET("/cardplatform/balance", handler.RequireCardAccount, handler.CardPlatformBalance)
+			admin.GET("/cardplatform/cdks", handler.RequireCardAccount, handler.CardPlatformListCDKs)
+			admin.GET("/cardplatform/cdks/stored", handler.RequireCardAccount, handler.CardPlatformListStoredCDKs)
+			admin.POST("/cardplatform/cdks", handler.RequireCardAccount, handler.CardPlatformIssueCDKs)
+			admin.POST("/cardplatform/cdks/sync", handler.RequireCardAccount, handler.CardPlatformSyncUpstreamCDKs)
+			admin.POST("/cardplatform/cdks/store", handler.RequireCardAccount, handler.CardPlatformStoreCDKCodes)
+			admin.POST("/cardplatform/cdks/batch-disable", handler.RequireCardAccount, handler.CardPlatformBatchDisableCDKs)
+			admin.POST("/cardplatform/cdks/batch-enable", handler.RequireCardAccount, handler.CardPlatformBatchEnableCDKs)
+			admin.POST("/cardplatform/cdks/batch-note", handler.RequireCardAccount, handler.CardPlatformBatchSetCDKNote)
+			admin.POST("/cardplatform/cdks/batch-clear-note", handler.RequireCardAccount, handler.CardPlatformBatchClearCDKNote)
+			admin.PUT("/cardplatform/cdks/:id/note", handler.RequireCardAccount, handler.CardPlatformSetCDKNote)
+			admin.POST("/cardplatform/cdks/:id/disable", handler.RequireCardAccount, handler.CardPlatformDisableCDK)
+			admin.POST("/cardplatform/cdks/:id/enable", handler.RequireCardAccount, handler.CardPlatformEnableCDK)
+			admin.GET("/cardplatform/cdk-orders", handler.RequireCardAccount, handler.CardPlatformListCDKOrders)
+			admin.GET("/cardplatform/cdk-orders/:id", handler.RequireCardAccount, handler.CardPlatformGetCDKOrder)
+			admin.DELETE("/cardplatform/cards/:id", handler.RequireCardAccount, handler.CardPlatformDeleteCard)
 
 			// Webhook 事件列表 + 配置提示
 			admin.GET("/webhooks/events", handler.AdminListWebhooks)
@@ -218,19 +221,20 @@ func setupRoutes(r *gin.Engine) {
 			admin.PUT("/settings", handler.AdminPutSettings)
 
 			// 自动选卡权重配置
-			admin.GET("/card-selection/rules", handler.AdminGetCardSelectionRules)
-			admin.PUT("/card-selection/rules", handler.AdminPutCardSelectionRules)
-			admin.GET("/card-selection/plan-status", handler.AdminGetPlanStatus)
-			admin.POST("/card-selection/sync", handler.AdminSyncPlanStatus)
-			admin.GET("/card-selection/site-policy", handler.AdminGetSiteRedeemPolicy)
-			admin.PUT("/card-selection/site-policy", handler.AdminPutSiteRedeemPolicy)
+			admin.POST("/card-selection/rules/sync", handler.RequireCardAccount, handler.AdminSyncCardRules)
+			admin.GET("/card-selection/rules", handler.RequireCardAccount, handler.AdminGetCardSelectionRules)
+			admin.PUT("/card-selection/rules", handler.RequireCardAccount, handler.AdminPutCardSelectionRules)
+			admin.GET("/card-selection/plan-status", handler.RequireCardAccount, handler.AdminGetPlanStatus)
+			admin.POST("/card-selection/sync", handler.RequireCardAccount, handler.AdminSyncPlanStatus)
+			admin.GET("/card-selection/site-policy", handler.RequireCardAccount, handler.AdminGetSiteRedeemPolicy)
+			admin.PUT("/card-selection/site-policy", handler.RequireCardAccount, handler.AdminPutSiteRedeemPolicy)
 
 			// 卡健康：同卡失败 × 邮箱归因 → 坏卡冻结
-			admin.GET("/card-health", handler.AdminListCardHealth)
+			admin.GET("/card-health", handler.RequireCardAccount, handler.AdminListCardHealth)
 			admin.GET("/card-health/policy", handler.AdminGetCardHealthPolicy)
 			admin.PUT("/card-health/policy", handler.AdminPutCardHealthPolicy)
-			admin.POST("/card-health/unblock", handler.AdminUnblockCard)
-			admin.POST("/card-health/observe", handler.AdminReobserveCardOrder)
+			admin.POST("/card-health/unblock", handler.RequireCardAccount, handler.AdminUnblockCard)
+			admin.POST("/card-health/observe", handler.RequireCardAccount, handler.AdminReobserveCardOrder)
 		}
 	}
 

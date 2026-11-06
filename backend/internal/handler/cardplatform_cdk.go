@@ -58,7 +58,7 @@ func writeCardErr(c *gin.Context, err error) {
 // CardPlatformPlans GET /api/v1/admin/cardplatform/plans
 // 实时套餐服务费（CDK 收费价）
 func CardPlatformPlans(c *gin.Context) {
-	cli := cardplatform.NewFromSettings()
+	cli := cardplatform.NewForContext(c.Request.Context())
 	plans, err := cli.GetPlans(c.Request.Context(), c.Query("product"))
 	if err != nil {
 		writeCardErr(c, err)
@@ -86,7 +86,7 @@ func CardPlatformPlans(c *gin.Context) {
 
 // CardPlatformBalance GET /api/v1/admin/cardplatform/balance
 func CardPlatformBalance(c *gin.Context) {
-	cli := cardplatform.NewFromSettings()
+	cli := cardplatform.NewForContext(c.Request.Context())
 	bal, err := cli.GetBalance(c.Request.Context())
 	if err != nil {
 		writeCardErr(c, err)
@@ -152,7 +152,7 @@ func CardPlatformIssueCDKs(c *gin.Context) {
 	if product == "claude" {
 		plan = cardplatform.ClaudeBarePlan(plan)
 	}
-	if cli := cardplatform.NewFromSettings(); cli != nil {
+	if cli := cardplatform.NewForContext(c.Request.Context()); cli != nil {
 		if plans, err := cli.GetPlans(c.Request.Context(), product); err == nil && plans != nil && len(plans.Plans) > 0 {
 			sellable := plans.SellableKeys()
 			if len(sellable) > 0 && !sellable[plan] {
@@ -184,7 +184,7 @@ func CardPlatformIssueCDKs(c *gin.Context) {
 		return
 	}
 
-	cli := cardplatform.NewFromSettings()
+	cli := cardplatform.NewForContext(c.Request.Context())
 	idem := c.GetHeader("Idempotency-Key")
 	if idem == "" {
 		b := make([]byte, 16)
@@ -193,7 +193,7 @@ func CardPlatformIssueCDKs(c *gin.Context) {
 	}
 	// 本站选卡配置 → 发码偏好（跳过未启动卡头；ch1 等历史写法会归一成 one）
 	var issuePrefs []cardplatform.IssueCardPref
-	pref, hasSitePref := issuePrefFromSite()
+	pref, hasSitePref := issuePrefFromSite(cardplatform.AccountID(c.Request.Context()))
 	payCountry := strings.ToUpper(strings.TrimSpace(req.PaymentCountry))
 	if product == "grok" {
 		payCountry = "US"
@@ -281,7 +281,7 @@ func CardPlatformIssueCDKs(c *gin.Context) {
 		}
 		// 本站 SQLite 持久化完整码（卡台列表只回 prefix）
 		storedOK := false
-		if err := db.SaveCardplatformCDKCode(it.ID, code, prefix, it.Plan, it.FeeAmountMinor, payCountry); err != nil {
+		if err := db.ForAccount(cardplatform.AccountID(c.Request.Context())).SaveCardplatformCDKCode(it.ID, code, prefix, it.Plan, it.FeeAmountMinor, payCountry); err != nil {
 			storeFailed++
 			log.Printf("[cdk-issue] save full code failed id=%d prefix=%s: %v", it.ID, prefix, err)
 		} else {
@@ -317,7 +317,7 @@ func CardPlatformSyncUpstreamCDKs(c *gin.Context) {
 		MaxPages int    `json:"max_pages"`
 	}
 	_ = c.ShouldBindJSON(&req)
-	cli := cardplatform.NewFromSettings()
+	cli := cardplatform.NewForContext(c.Request.Context())
 	res, err := cli.SyncUpstreamFullCodes(c.Request.Context(), req.Status, req.Plan, req.MaxPages)
 	if err != nil {
 		writeCardErr(c, err)
@@ -340,7 +340,7 @@ func CardPlatformSyncUpstreamCDKs(c *gin.Context) {
 		"upstream_total":            res.UpstreamTotal,
 		"need_cardplatform_upgrade": res.NeedCardplatformUpgrade,
 		"codes":                     res.Codes,
-		"full_code_in_store":        db.CountCardplatformCDKCodes(),
+		"full_code_in_store":        db.ForAccount(cardplatform.AccountID(c.Request.Context())).CountCardplatformCDKCodes(),
 		"msg":                       msg,
 	})
 }
@@ -349,48 +349,14 @@ func CardPlatformSyncUpstreamCDKs(c *gin.Context) {
 // 把完整码写入本站 SQLite（发码时自动写；也可用本机缓存/导出回填历史码）。
 // body: { items: [{ id, code, code_prefix?, plan?, fee_amount_minor? }] }
 func CardPlatformStoreCDKCodes(c *gin.Context) {
-	var req struct {
-		Items []struct {
-			ID             int64  `json:"id"`
-			Code           string `json:"code"`
-			CodePrefix     string `json:"code_prefix"`
-			Plan           string `json:"plan"`
-			FeeAmountMinor int64  `json:"fee_amount_minor"`
-		} `json:"items"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil || len(req.Items) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "items required"})
+	// Browser caches lack verifiable ownership. Fetch full codes with this account's key.
+	cli := cardplatform.NewForContext(c.Request.Context())
+	res, err := cli.SyncUpstreamFullCodes(c.Request.Context(), "", "", 50)
+	if err != nil {
+		writeCardErr(c, err)
 		return
 	}
-	if len(req.Items) > 500 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "items max 500"})
-		return
-	}
-	saved, skipped, failed := 0, 0, 0
-	for _, it := range req.Items {
-		code := strings.TrimSpace(it.Code)
-		if len(code) < 20 || !strings.Contains(code, "-") {
-			skipped++
-			continue
-		}
-		prefix := strings.TrimSpace(it.CodePrefix)
-		if prefix == "" && len(code) >= 14 {
-			prefix = code[:14]
-		}
-		if err := db.SaveCardplatformCDKCode(it.ID, code, prefix, it.Plan, it.FeeAmountMinor); err != nil {
-			failed++
-			log.Printf("[cdk-store] save failed id=%d: %v", it.ID, err)
-			continue
-		}
-		saved++
-	}
-	u, _ := c.Get("username")
-	username, _ := u.(string)
-	db.WriteAudit(username, "cardplatform_store_cdk",
-		"saved="+strconv.Itoa(saved)+" skipped="+strconv.Itoa(skipped)+" failed="+strconv.Itoa(failed), c.ClientIP())
-	c.JSON(http.StatusOK, gin.H{
-		"ok": true, "saved": saved, "skipped": skipped, "failed": failed,
-	})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "saved": res.Imported, "skipped": 0, "failed": 0, "msg": "已按所选账号从卡台同步；不信任浏览器缓存的归属"})
 }
 
 // CardPlatformListStoredCDKs GET /api/v1/admin/cardplatform/cdks/stored
@@ -414,7 +380,7 @@ func CardPlatformListStoredCDKs(c *gin.Context) {
 		if limit <= 0 {
 			limit = 10000
 		}
-		list, _, err := db.ListCardplatformStoredCDKCodesPage(plan, q, status, 1, limit)
+		list, _, err := db.ForAccount(cardplatform.AccountID(c.Request.Context())).ListCardplatformStoredCDKCodesPage(plan, q, status, 1, limit)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -454,7 +420,7 @@ func CardPlatformListStoredCDKs(c *gin.Context) {
 		page = 1
 	}
 
-	list, total, err := db.ListCardplatformStoredCDKCodesPage(plan, q, status, page, pageSize)
+	list, total, err := db.ForAccount(cardplatform.AccountID(c.Request.Context())).ListCardplatformStoredCDKCodesPage(plan, q, status, page, pageSize)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -476,7 +442,7 @@ func CardPlatformListStoredCDKs(c *gin.Context) {
 	for _, it := range list {
 		noteIDs = append(noteIDs, it.UpstreamID)
 	}
-	notes := db.MapCardplatformCDKNotes(noteIDs)
+	notes := db.ForAccount(cardplatform.AccountID(c.Request.Context())).MapCardplatformCDKNotes(noteIDs)
 	out := make([]gin.H, 0, len(list))
 	for _, it := range list {
 		st := it.Status
@@ -504,7 +470,7 @@ func CardPlatformListStoredCDKs(c *gin.Context) {
 		"total":              total,
 		"page":               page,
 		"page_size":          pageSize,
-		"full_code_in_store": db.CountCardplatformCDKCodes(),
+		"full_code_in_store": db.ForAccount(cardplatform.AccountID(c.Request.Context())).CountCardplatformCDKCodes(),
 		"server_stored":      true,
 		"status_synced":      len(metadata) > 0,
 	})
@@ -517,7 +483,7 @@ func refreshStoredCDKMetadata(ctx context.Context, ids []int64) map[int64]cardpl
 	if len(ids) == 0 {
 		return out
 	}
-	cli := cardplatform.NewFromSettings()
+	cli := cardplatform.NewForContext(ctx)
 	ch := make(chan cardplatform.CDKListItem, len(ids))
 	sem := make(chan struct{}, 6)
 	var wg sync.WaitGroup
@@ -538,7 +504,7 @@ func refreshStoredCDKMetadata(ctx context.Context, ids []int64) map[int64]cardpl
 				if it.ID == id {
 					it.Status = strings.ToLower(strings.TrimSpace(it.Status))
 					it.PaymentCountry = strings.ToUpper(strings.TrimSpace(it.PaymentCountry))
-					_ = db.UpdateCardplatformCDKMetadata(id, it.Status, it.PaymentCountry)
+					_ = db.ForAccount(cardplatform.AccountID(ctx)).UpdateCardplatformCDKMetadata(id, it.Status, it.PaymentCountry)
 					ch <- it
 					return
 				}
@@ -562,12 +528,12 @@ func CardPlatformDisableCDK(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	cli := cardplatform.NewFromSettings()
+	cli := cardplatform.NewForContext(c.Request.Context())
 	if err := cli.DisableCDK(c.Request.Context(), id); err != nil {
 		writeCardErr(c, err)
 		return
 	}
-	_ = db.UpdateCardplatformCDKStatus(id, "disabled")
+	_ = db.ForAccount(cardplatform.AccountID(c.Request.Context())).UpdateCardplatformCDKStatus(id, "disabled")
 	u, _ := c.Get("username")
 	username, _ := u.(string)
 	db.WriteAudit(username, "cardplatform_disable_cdk", "id="+strconv.FormatInt(id, 10), c.ClientIP())
@@ -581,12 +547,12 @@ func CardPlatformEnableCDK(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
 		return
 	}
-	cli := cardplatform.NewFromSettings()
+	cli := cardplatform.NewForContext(c.Request.Context())
 	if err := cli.EnableCDK(c.Request.Context(), id); err != nil {
 		writeCardErr(c, err)
 		return
 	}
-	_ = db.UpdateCardplatformCDKStatus(id, "unused")
+	_ = db.ForAccount(cardplatform.AccountID(c.Request.Context())).UpdateCardplatformCDKStatus(id, "unused")
 	u, _ := c.Get("username")
 	username, _ := u.(string)
 	db.WriteAudit(username, "cardplatform_enable_cdk", "id="+strconv.FormatInt(id, 10), c.ClientIP())
@@ -607,14 +573,14 @@ func CardPlatformBatchDisableCDKs(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "ids max 100"})
 		return
 	}
-	cli := cardplatform.NewFromSettings()
+	cli := cardplatform.NewForContext(c.Request.Context())
 	res, err := cli.BatchDisableCDKs(c.Request.Context(), req.IDs)
 	if err != nil {
 		writeCardErr(c, err)
 		return
 	}
 	for _, id := range res.Disabled {
-		_ = db.UpdateCardplatformCDKStatus(id, "disabled")
+		_ = db.ForAccount(cardplatform.AccountID(c.Request.Context())).UpdateCardplatformCDKStatus(id, "disabled")
 	}
 	u, _ := c.Get("username")
 	username, _ := u.(string)
@@ -640,14 +606,14 @@ func CardPlatformBatchEnableCDKs(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "ids max 100"})
 		return
 	}
-	cli := cardplatform.NewFromSettings()
+	cli := cardplatform.NewForContext(c.Request.Context())
 	res, err := cli.BatchEnableCDKs(c.Request.Context(), req.IDs)
 	if err != nil {
 		writeCardErr(c, err)
 		return
 	}
 	for _, id := range res.Enabled {
-		_ = db.UpdateCardplatformCDKStatus(id, "unused")
+		_ = db.ForAccount(cardplatform.AccountID(c.Request.Context())).UpdateCardplatformCDKStatus(id, "unused")
 	}
 	u, _ := c.Get("username")
 	username, _ := u.(string)
@@ -664,7 +630,7 @@ func CardPlatformBatchEnableCDKs(c *gin.Context) {
 func CardPlatformListCDKs(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	ps, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	cli := cardplatform.NewFromSettings()
+	cli := cardplatform.NewForContext(c.Request.Context())
 	res, err := cli.ListCDKsQuery(c.Request.Context(), cardplatform.CDKListQuery{
 		Page: page, PageSize: ps,
 		Status: c.Query("status"), Plan: c.Query("plan"), Query: c.Query("q"),
@@ -691,15 +657,15 @@ func CardPlatformListCDKs(c *gin.Context) {
 	for _, it := range res.List {
 		ids = append(ids, it.ID)
 	}
-	notes := db.MapCardplatformCDKNotes(ids)
+	notes := db.ForAccount(cardplatform.AccountID(c.Request.Context())).MapCardplatformCDKNotes(ids)
 	out := make([]rowOut, 0, len(res.List))
 	withFull := 0
 	for _, it := range res.List {
-		full, ok := db.LookupCardplatformCDKCode(it.ID, it.CodePrefix)
+		full, ok := db.ForAccount(cardplatform.AccountID(c.Request.Context())).LookupCardplatformCDKCode(it.ID, it.CodePrefix)
 		if !ok {
 			if up := it.FullCodeText(); up != "" {
 				full, ok = up, true
-				_ = db.SaveCardplatformCDKCodeWithStatus(it.ID, up, it.CodePrefix, it.Plan, it.FeeAmountMinor, it.Status, it.PaymentCountry)
+				_ = db.ForAccount(cardplatform.AccountID(c.Request.Context())).SaveCardplatformCDKCodeWithStatus(it.ID, up, it.CodePrefix, it.Plan, it.FeeAmountMinor, it.Status, it.PaymentCountry)
 			}
 		}
 		row := rowOut{
@@ -709,7 +675,7 @@ func CardPlatformListCDKs(c *gin.Context) {
 			HasFullCode: ok, Note: notes[it.ID],
 		}
 		if ok {
-			_ = db.UpdateCardplatformCDKRegion(it.ID, row.PaymentCountry)
+			_ = db.ForAccount(cardplatform.AccountID(c.Request.Context())).UpdateCardplatformCDKRegion(it.ID, row.PaymentCountry)
 			row.Code = full
 			row.FullCode = full
 			withFull++
@@ -720,7 +686,7 @@ func CardPlatformListCDKs(c *gin.Context) {
 		"list":               out,
 		"total":              res.Total,
 		"full_code_on_page":  withFull,
-		"full_code_in_store": db.CountCardplatformCDKCodes(),
+		"full_code_in_store": db.ForAccount(cardplatform.AccountID(c.Request.Context())).CountCardplatformCDKCodes(),
 		"server_stored":      true,
 	})
 }
@@ -747,7 +713,7 @@ func CardPlatformListCDKOrders(c *gin.Context) {
 		CDKID:    int64Any(c.Query("cdk_id")),
 		OrderID:  int64Any(c.Query("order_id")),
 	}
-	cli := cardplatform.NewFromSettings()
+	cli := cardplatform.NewForContext(c.Request.Context())
 	raw, err := cli.ListCDKOrdersQuery(c.Request.Context(), q)
 	if err != nil {
 		writeCardErr(c, err)
@@ -771,7 +737,7 @@ func CardPlatformDeleteCard(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "card id required"})
 		return
 	}
-	cli := cardplatform.NewFromSettings()
+	cli := cardplatform.NewForContext(c.Request.Context())
 	raw, err := cli.DeleteCard(c.Request.Context(), id)
 	if err != nil {
 		writeCardErr(c, err)
@@ -798,7 +764,7 @@ func CardPlatformGetCDKOrder(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "id required"})
 		return
 	}
-	cli := cardplatform.NewFromSettings()
+	cli := cardplatform.NewForContext(c.Request.Context())
 	raw, err := cli.GetCDKOrder(c.Request.Context(), id)
 	if err != nil {
 		writeCardErr(c, err)
@@ -1035,14 +1001,9 @@ func PublicCDKPreflight(c *gin.Context) {
 	if tok == "" {
 		tok = extractJSONString(raw, "redemption_token", "token")
 	}
-	code := str(body["code"])
-	if code == "" {
-		if found, err := db.FindCodeByRedemptionToken(tok); err == nil && found != "" {
-			code = found
-		}
-	}
+	code, _ := db.FindCodeByRedemptionToken(tok)
 	sess := extractCredentialSession(body["credential"])
-	if sess != "" && !cardplatform.IsXPremiumCredential(sess) && !cardplatform.IsGrokCredential(sess) && (code != "" || tok != "") {
+	if st >= 200 && st < 300 && code != "" && sess != "" && !cardplatform.IsXPremiumCredential(sess) && !cardplatform.IsGrokCredential(sess) && (code != "" || tok != "") {
 		if err := db.BindCDKSession(code, tok, sess); err != nil {
 			log.Printf("[cdk-preflight] bind session failed code=%s tok=%s: %v", code, shortTok(tok), err)
 		}
@@ -1064,7 +1025,7 @@ func PublicCDKRedeem(c *gin.Context) {
 	// 本站坏卡黑名单 → 本单排除这些卡：CDK 走 CDK 自己的选卡规则。实时读黑名单、纯选卡维度
 	// 排除,卡台不冻结这些卡(卡台直充用户依旧可用)。拉黑即时生效,无需固化/对账。
 	if _, exists := body["exclude_card_ids"]; !exists {
-		if ids, err := db.ListActiveBlockedCardIDs(); err == nil && len(ids) > 0 {
+		if ids, err := db.ForAccount(publicBodyAccountID(body)).ListActiveBlockedCardIDs(); err == nil && len(ids) > 0 {
 			body["exclude_card_ids"] = ids
 		}
 	}
@@ -1232,60 +1193,52 @@ func docsDefaultPlans() map[string]cardplatform.SellablePlan {
 
 // 公开展示服务费参考价（不暴露 API Key；若未配置 Key 则返回文档默认价）
 func PublicCDKPlans(c *gin.Context) {
-	if c.Query("product") == "x" {
-		// X has no safe GPT fallback catalogue, including on old upstreams.
-		plans, err := cardplatform.NewFromSettings().GetPlans(c.Request.Context(), "x")
+	// Public catalogue is a union, never an implicit active/funding account.
+	// Prices are references only; an existing code is priced by its issuer.
+	accounts, err := db.ListCardAccounts()
+	if err != nil {
+		c.JSON(503, gin.H{"error": "套餐信息暂不可用"})
+		return
+	}
+	items := map[string]cardplatform.SellablePlan{}
+	rows := []cardplatform.SellablePlan{}
+	for _, a := range accounts {
+		if a.APIKey == "" {
+			continue
+		}
+		plans, err := cardplatform.NewForAccount(a).GetPlans(c.Request.Context(), c.Query("product"))
 		if err != nil {
-			writeCardErr(c, err)
+			continue
+		}
+		for _, p := range plans.SellablePlans() {
+			if _, ok := items[p.Key]; !ok {
+				items[p.Key] = p
+				rows = append(rows, p)
+			}
+		}
+	}
+	if len(rows) == 0 {
+		if p := c.Query("product"); p != "" && p != "gpt" {
+			c.JSON(503, gin.H{"error": "套餐信息暂不可用，请稍后重试"})
 			return
 		}
-		rows := plans.SellablePlans()
-		items := map[string]cardplatform.SellablePlan{}
-		for _, p := range rows {
-			items[p.Key] = p
-		}
-		c.JSON(http.StatusOK, gin.H{"version": plans.Version, "plans": items, "registry": rows, "payment_regions": plans.PaymentRegions})
+		c.JSON(200, gin.H{"version": 0, "source": "docs_default", "plans": docsDefaultPlans(), "registry": docsDefaultRegistry(), "note": docsDefaultNote})
 		return
 	}
-	cli := cardplatform.NewFromSettings()
-	cfg := cardplatform.LoadConfig()
-	if cfg.APIKey == "" {
-		c.JSON(http.StatusOK, gin.H{
-			"version":  0,
-			"source":   "docs_default",
-			"plans":    docsDefaultPlans(),
-			"registry": docsDefaultRegistry(),
-			"note":     docsDefaultNote,
-		})
-		return
+	// Remove issuer-specific fees from an account-agnostic public catalogue.
+	publicRows := []map[string]any{}
+	publicItems := map[string]any{}
+	for _, p := range rows {
+		raw, _ := json.Marshal(p)
+		var m map[string]any
+		_ = json.Unmarshal(raw, &m)
+		delete(m, "service_fee_usd_minor")
+		delete(m, "service_fee_usd")
+		delete(m, "serviceFeeUsdMinor")
+		publicRows = append(publicRows, m)
+		publicItems[p.Key] = m
 	}
-	plans, err := cli.GetPlans(c.Request.Context(), c.Query("product"))
-	if err != nil {
-		// 降级文档默认
-		c.JSON(http.StatusOK, gin.H{
-			"version":  0,
-			"source":   "docs_default_fallback",
-			"error":    err.Error(),
-			"plans":    docsDefaultPlans(),
-			"registry": docsDefaultRegistry(),
-			"note":     docsDefaultNote,
-		})
-		return
-	}
-	// 同 CardPlatformPlans：只公开真能买到的档位。
-	// 公开页比后台更不能乱列——列了 Claude，客户会照着去问「怎么买不到」。
-	sellable := plans.SellablePlans()
-	m := map[string]any{}
-	for _, p := range sellable {
-		m[p.Key] = p
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"version": plans.Version,
-		"source":  "cardplatform_live",
-		"plans":   m,
-		// 档位展示顺序/文案/性质：前端据此渲染，不再维护自己的档位清单
-		"registry": sellable,
-	})
+	c.JSON(200, gin.H{"version": 0, "source": "account_catalogues", "plans": publicItems, "registry": publicRows, "note": "兑换按卡密所属账号及其套餐信息处理"})
 }
 
 func str(v any) string {
@@ -1381,7 +1334,7 @@ func CardPlatformSetCDKNote(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	if err := db.SetCardplatformCDKNote(id, req.Note); err != nil {
+	if err := db.ForAccount(cardplatform.AccountID(c.Request.Context())).SetCardplatformCDKNote(id, req.Note); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -1392,7 +1345,7 @@ func CardPlatformSetCDKNote(c *gin.Context) {
 		action = "cardplatform_cdk_note_clear"
 	}
 	db.WriteAudit(username, action, "id="+strconv.FormatInt(id, 10), c.ClientIP())
-	c.JSON(http.StatusOK, gin.H{"ok": true, "id": id, "note": db.GetCardplatformCDKNote(id)})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "id": id, "note": db.ForAccount(cardplatform.AccountID(c.Request.Context())).GetCardplatformCDKNote(id)})
 }
 
 // CardPlatformBatchSetCDKNote POST /api/v1/admin/cardplatform/cdks/batch-note
@@ -1410,7 +1363,7 @@ func CardPlatformBatchSetCDKNote(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "单次最多 200 条"})
 		return
 	}
-	okN, failed, err := db.BatchSetCardplatformCDKNotes(req.IDs, req.Note)
+	okN, failed, err := db.ForAccount(cardplatform.AccountID(c.Request.Context())).BatchSetCardplatformCDKNotes(req.IDs, req.Note)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -1444,7 +1397,7 @@ func CardPlatformBatchClearCDKNote(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "单次最多 200 条"})
 		return
 	}
-	n, err := db.ClearCardplatformCDKNotes(req.IDs)
+	n, err := db.ForAccount(cardplatform.AccountID(c.Request.Context())).ClearCardplatformCDKNotes(req.IDs)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

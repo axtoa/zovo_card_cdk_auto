@@ -1,480 +1,130 @@
 <template>
   <div class="space-y-4">
-    <!-- 出口 IP -->
-    <div class="card egress-hero">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <div class="text-xs uppercase tracking-wide text-muted">本机出口 IP · 卡台白名单</div>
-          <div class="mt-1 flex flex-wrap items-baseline gap-3">
-            <span class="text-3xl font-bold mono text-ink">{{ egressIp || '…' }}</span>
-            <el-tag v-if="egressIp" size="small" effect="dark" type="warning">填到卡台 API Key 白名单</el-tag>
-          </div>
-          <p class="text-xs text-subtle mt-2">发码/拉价格/余额从此 IP 出网（不是浏览器 IP）</p>
-        </div>
-        <div class="flex gap-2">
-          <el-button type="primary" :disabled="!egressIp" @click="copyText(egressIp)">复制 IP</el-button>
-          <el-button :loading="loadingNet" @click="loadNetwork">重探测</el-button>
-        </div>
+    <section class="card">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div><h2 class="text-xl font-bold">卡台账号</h2><p class="text-sm text-muted mt-1">所有账号同时可用。发码时选择账号，卡密后续兑换、查单和补发始终归属原账号。</p></div>
+        <div class="flex gap-2"><el-button :loading="refreshing" @click="refreshAll">刷新全部余额</el-button><el-button type="primary" @click="edit()">新增账号</el-button></div>
       </div>
-    </div>
-
-    <!-- 配置 -->
-    <div class="card space-y-4">
-      <div class="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h2 class="text-xl font-bold text-ink">卡台接入</h2>
-          <p class="text-sm text-muted mt-1">Base 用站点根；Open API / CDK 路径自动拼接</p>
-        </div>
-        <div class="flex gap-2">
-          <el-tag v-if="hints.card_api_key_configured" type="success" effect="plain">Key 已存</el-tag>
-          <el-tag v-else type="info" effect="plain">Key 未配置</el-tag>
-        </div>
+      <el-alert v-if="error" :title="error" type="error" :closable="false" class="mt-3" />
+      <div class="overflow-x-auto mt-4">
+        <table class="data-table" style="min-width: 880px">
+          <thead><tr><th>账号</th><th>可消费余额（USD）</th><th>总余额 / 保证金</th><th>余额更新时间</th><th>回调密钥</th><th>操作</th></tr></thead>
+          <tbody><tr v-for="a in accounts" :key="a.id">
+            <td><strong>{{ a.name }}</strong><div class="text-xs text-muted">#{{ a.id }} · {{ a.api_key_hint || '待配置 Key' }}</div></td>
+            <td><strong class="text-lg">{{ balances[a.id]?.spendable ?? '—' }}</strong><div v-if="balances[a.id]?.error" class="text-xs text-red-500">{{ balances[a.id].error }}</div></td>
+            <td>{{ balances[a.id]?.total ?? '—' }} / {{ balances[a.id]?.reserve ?? '—' }}</td>
+            <td class="text-xs text-muted">{{ balances[a.id]?.time ?? '尚未查询' }}<div v-if="balances[a.id]?.error && balances[a.id]?.time">上次成功数据，仅供参考</div></td>
+            <td><el-tag :type="a.webhook_secret_configured ? 'success' : 'warning'">{{ a.webhook_secret_configured ? '已配置' : '待配置' }}</el-tag></td>
+            <td><el-button size="small" :loading="balances[a.id]?.loading" @click="refreshBalance(a)">刷新余额</el-button><el-button size="small" @click="edit(a)">编辑</el-button></td>
+          </tr></tbody>
+        </table>
       </div>
-
-      <div class="flex flex-wrap gap-2">
-        <el-button round :type="presetActive === 'prod' ? 'primary' : 'default'" @click="applyPreset('prod')">
-          生产 · zovocard.com
-        </el-button>
-        <el-button round :type="presetActive === 'sandbox' ? 'primary' : 'default'" @click="applyPreset('sandbox')">
-          沙盒 · sandbox
-        </el-button>
-      </div>
-
-      <div class="path-chips">
-        <div class="path-chip">
-          <span class="k">Open API</span>
-          <code class="v">{{ resolvedOpenapi }}</code>
-        </div>
-        <div class="path-chip">
-          <span class="k">公开 CDK</span>
-          <code class="v">{{ resolvedCdk }}</code>
-        </div>
-      </div>
-
-      <el-form label-position="top" class="max-w-xl" @submit.prevent>
-        <el-form-item label="卡台 Base URL">
-          <el-input v-model="form.card_api_base" clearable size="large" @blur="normalizeBase" />
-        </el-form-item>
-        <el-form-item label="Open API Key (sk_…)">
-          <el-input
-            v-model="secrets.card_api_key"
-            type="password"
-            show-password
-            clearable
-            size="large"
-            :placeholder="keyHint"
-            autocomplete="off"
-          />
-        </el-form-item>
-        <el-form-item label="代理换码密码">
-          <el-input
-            v-model="secrets.agent_swap_password"
-            type="password"
-            show-password
-            clearable
-            size="large"
-            :placeholder="swapPwHint"
-            autocomplete="off"
-          />
-          <p class="text-xs text-subtle mt-1">
-            代理凭此密码进入隐藏页，将<strong>失败且未扣款</strong>的 CDK 换一张新码。留空保存=不修改；
-            <el-tag v-if="hints.agent_swap_password_configured" size="small" type="success" effect="plain">已设置</el-tag>
-            <el-tag v-else size="small" type="info" effect="plain">未设置</el-tag>
-          </p>
-        </el-form-item>
-        <el-form-item label="发给代理的换码链接（可复制）">
-          <div class="flex flex-wrap items-center gap-2 w-full">
-            <el-input :model-value="agentSwapUrl" readonly size="large" class="!flex-1 mono" />
-            <el-button type="primary" size="large" @click="copyText(agentSwapUrl)">复制链接</el-button>
-            <el-button size="large" @click="window.open(agentSwapUrl, '_blank')">打开</el-button>
-          </div>
-          <p class="text-xs text-subtle mt-1">
-            路径固定 <code class="mono">/partner/swap</code>（短链 <code class="mono">/a/swap</code>）。导航栏不展示，把完整链接 + 密码发给代理即可。
-          </p>
-        </el-form-item>
-        <div class="flex flex-wrap gap-2">
-          <el-button type="primary" size="large" :loading="saving" @click="save">保存</el-button>
-          <el-button type="success" size="large" plain :loading="busy" @click="runAllChecks">
-            一键检测
-          </el-button>
-          <el-button size="large" :loading="pinging" @click="ping">连通</el-button>
-          <el-button size="large" :loading="loadingPlans" @click="loadPlans">价格</el-button>
-          <el-button size="large" :loading="loadingBal" @click="loadBalance">余额</el-button>
-        </div>
+      <p class="text-xs text-muted mt-3">余额来自各账号的卡台接口；查询失败显示错误并保留上次成功时间，不会把失败当作余额为零。</p>
+      <router-link to="/ops/cdkeys" class="btn-primary inline-block mt-3">去发码</router-link>
+    </section>
+    <section class="card space-y-3">
+      <h3 class="font-semibold">共用接入信息</h3>
+      <el-form label-position="top" class="max-w-2xl">
+        <el-form-item label="卡台站点"><el-input v-model="base" :disabled="accounts.some(a => a.api_key_configured)" /></el-form-item>
+        <p class="text-xs text-muted mb-3">账号使用同一卡台。配置账号后固定站点，避免旧卡密被发送到其他平台。</p>
+        <el-form-item label="共用回调地址"><el-input :model-value="webhookUrl" readonly><template #append><el-button @click="copy(webhookUrl)">复制</el-button></template></el-input></el-form-item>
+        <p class="text-sm text-muted mb-3">每个账号在卡台填写同一地址，再将各自的 Webhook Secret 填入上方账号配置。不同账号必须使用不同密钥。</p>
+        <el-form-item label="本机出口 IP（加入卡台 API 白名单）"><el-input :model-value="egress || '尚未检测'" readonly><template #append><el-button :loading="checkingNetwork" @click="loadNetwork">检测</el-button></template></el-input></el-form-item>
+        <el-form-item label="代理换码密码（全站共用）"><el-input v-model="swapPassword" type="password" show-password :placeholder="swapConfigured ? '已设置，留空不修改' : '至少 6 位'" autocomplete="new-password" /></el-form-item>
+        <el-form-item label="代理换码链接"><el-input :model-value="swapUrl" readonly><template #append><el-button @click="copy(swapUrl)">复制</el-button></template></el-input></el-form-item>
+        <el-button type="primary" :loading="savingSettings" @click="saveSettings">保存共用设置</el-button>
       </el-form>
-    </div>
-
-    <!-- 状态摘要卡片（精简，详情进弹窗） -->
-    <div class="grid gap-3 sm:grid-cols-3">
-      <button type="button" class="status-card" @click="openStatusDialog">
-        <div class="sc-label">连通状态</div>
-        <div class="sc-value" :class="pingOk === true ? 'ok' : pingOk === false ? 'bad' : ''">
-          {{ pingOk === true ? '正常' : pingOk === false ? '异常' : '未检测' }}
-        </div>
-        <div class="sc-hint">点击查看详情</div>
-      </button>
-      <button type="button" class="status-card" @click="openBalanceDialog">
-        <div class="sc-label">可消费余额</div>
-        <div class="sc-value mono">{{ spendableDisplay }}</div>
-        <div class="sc-hint">含保证金信息</div>
-      </button>
-      <button type="button" class="status-card" @click="openPlansDialog">
-        <div class="sc-label">服务费（实时）</div>
-        <div class="sc-value mono">{{ feeSummary }}</div>
-        <div class="sc-hint">v{{ plansVersion ?? '—' }} · 点击展开</div>
-      </button>
-    </div>
-
-    <div class="flex flex-wrap gap-2">
-      <router-link class="btn-primary" to="/ops/cdkeys">去发码</router-link>
-      <router-link class="btn-secondary" to="/ops/webhooks">Webhook</router-link>
-      <router-link class="btn-secondary" to="/ops/appearance">整站主题</router-link>
-    </div>
-
-    <!-- 连通详情弹窗 -->
-    <el-dialog v-model="dlgStatus" title="连通检测" width="480px" align-center destroy-on-close>
-      <el-result
-        :icon="pingOk ? 'success' : 'error'"
-        :title="pingOk ? '卡台可达' : '探测失败'"
-        :sub-title="pingMsg || ''"
-      />
-      <div class="result-grid mt-2">
-        <div v-for="(v, k) in pingTiles" :key="k" class="result-tile">
-          <div class="k">{{ k }}</div>
-          <div class="v mono">{{ v }}</div>
-        </div>
-      </div>
-      <template #footer>
-        <el-button @click="dlgStatus = false">关闭</el-button>
-        <el-button type="primary" :loading="pinging" @click="ping">重新探测</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- 余额弹窗 -->
-    <el-dialog v-model="dlgBal" title="账户余额" width="420px" align-center destroy-on-close>
-      <div class="result-grid">
-        <div class="result-tile">
-          <div class="k">可消费 spendable</div>
-          <div class="v mono text-lg">{{ bal.spendable ?? '—' }}</div>
-        </div>
-        <div class="result-tile">
-          <div class="k">总余额 balance</div>
-          <div class="v mono text-lg">{{ bal.balance ?? '—' }}</div>
-        </div>
-        <div class="result-tile">
-          <div class="k">风险保证金 reserve</div>
-          <div class="v mono text-lg">{{ bal.reserve ?? '—' }}</div>
-        </div>
-      </div>
-      <p class="text-xs text-muted mt-3">主动消费只能用 spendable（总余额含 20U 保证金）</p>
-      <template #footer>
-        <el-button @click="dlgBal = false">关闭</el-button>
-        <el-button type="primary" :loading="loadingBal" @click="loadBalance">刷新</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- 价格弹窗 -->
-    <el-dialog v-model="dlgPlans" title="实时服务费" width="520px" align-center destroy-on-close>
-      <p class="text-sm text-muted mb-3">
-        GET /openapi/v1/gpt-direct/plans · version {{ plansVersion ?? '—' }}
-      </p>
-      <div class="grid gap-3 sm:grid-cols-3">
-        <div v-for="p in planCards" :key="p.key" class="result-tile text-center">
-          <div class="k">{{ p.label }}</div>
-          <div class="v mono text-2xl" style="color: var(--primary)">${{ p.fee }}</div>
-          <div class="text-xs text-subtle mt-1">/ 张 · 可购</div>
-          <!-- 点数按比索计价：服务费之外还要垫这笔上游付款 -->
-          <div v-if="p.checkout" class="text-xs text-subtle">兑换垫付 {{ p.checkout }}</div>
-          <div v-if="p.minor != null" class="text-xs text-subtle">minor {{ p.minor }}</div>
-        </div>
-      </div>
-      <el-empty v-if="!planCards.length" description="卡台未开放任何可发码档位" :image-size="60" />
-      <el-alert
-        v-if="feeAllZero"
-        class="mt-3"
-        type="info"
-        :closable="false"
-        show-icon
-        title="当前账户配置服务费为 $0（卡台 payment config）。若应为 1/5/10U，请在卡台管理端检查 GPT 直充价格版本。"
-      />
-      <template #footer>
-        <el-button @click="dlgPlans = false">关闭</el-button>
-        <el-button type="primary" :loading="loadingPlans" @click="loadPlans">刷新价格</el-button>
-      </template>
+    </section>
+    <el-dialog v-model="showEditor" :title="form.id ? '编辑账号' : '新增卡台账号'" width="520px" :close-on-click-modal="false">
+      <el-form label-position="top" @submit.prevent>
+        <el-form-item label="账号名称"><el-input v-model="form.name" maxlength="80" placeholder="例如：主账号、备用资金账号" /></el-form-item>
+        <el-form-item label="API Key"><el-input v-model="form.api_key" type="password" show-password :disabled="keyLocked" :placeholder="keyLocked ? '已配置，保留原 Key' : '粘贴该账号的 API Key'" autocomplete="new-password" /></el-form-item>
+        <p class="text-xs text-muted mb-4">API Key 确定卡密归属，保存后不能替换成另一账号。使用新的 Key 请新增账号。</p>
+        <el-form-item label="Webhook Secret"><el-input v-model="form.webhook_secret" type="password" show-password :placeholder="secretConfigured ? '已配置，留空保留' : '粘贴该账号回调密钥（可稍后填写）'" autocomplete="new-password" /></el-form-item>
+        <p class="text-xs text-muted mb-3">更换回调密钥后，旧密钥保留 24 小时验证在途通知；新账号不能使用其他账号的历史密钥。</p>
+        <el-alert v-if="formError" :title="formError" type="error" :closable="false" />
+      </el-form>
+      <template #footer><el-button :disabled="saving" @click="showEditor=false">取消</el-button><el-button type="primary" :loading="saving" @click="saveAccount">保存账号</el-button></template>
     </el-dialog>
   </div>
 </template>
-
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { authFetch } from '../../lib/api'
+import type { CardAccount } from '../../lib/cardAccounts'
 import { dialog } from '../../lib/dialog'
-
-const PRESETS: Record<string, string> = {
-  prod: 'https://zovocard.com',
-  sandbox: 'https://sandbox.zovocard.com',
-}
-
-const form = reactive({ card_api_base: PRESETS.prod })
-const secrets = reactive({ card_api_key: '', agent_swap_password: '' })
-const hints = reactive<Record<string, any>>({})
-const saving = ref(false)
-const busy = ref(false)
-const pinging = ref(false)
-const loadingPlans = ref(false)
-const loadingBal = ref(false)
-const loadingNet = ref(false)
-
-const egressIp = ref('')
-const pingOk = ref<boolean | null>(null)
-const pingMsg = ref('')
-const pingTiles = ref<Record<string, string>>({})
-const bal = reactive<{ spendable?: string; balance?: string; reserve?: string }>({})
-const plansRaw = ref<Record<string, any>>({})
-const plansVersion = ref<number | null>(null)
-
-const dlgStatus = ref(false)
-const dlgBal = ref(false)
-const dlgPlans = ref(false)
-
-const keyHint = computed(() =>
-  hints.card_api_key_configured ? `已配置 ${hints.card_api_key_hint || ''}`.trim() : '粘贴 sk_…',
-)
-const swapPwHint = computed(() =>
-  hints.agent_swap_password_configured ? '已设置（留空保存不修改）' : '设置代理换码密码（至少 6 位）',
-)
-const agentSwapUrl = computed(() => {
-  if (typeof window === 'undefined') return '/partner/swap'
-  return `${window.location.origin}/partner/swap`
-})
-
-const siteRoot = computed(() => {
-  let b = (form.card_api_base || '').trim().replace(/\/+$/, '')
-  b = b.replace(/\/openapi\/v1$/i, '').replace(/\/openapi$/i, '')
-  return b || PRESETS.prod
-})
-const resolvedOpenapi = computed(() => siteRoot.value + '/openapi/v1')
-const resolvedCdk = computed(() => siteRoot.value + '/api/v1/cdk')
-const presetActive = computed(() => {
-  const b = siteRoot.value.toLowerCase()
-  if (b === PRESETS.prod) return 'prod'
-  if (b === PRESETS.sandbox) return 'sandbox'
-  return ''
-})
-
-// 档位清单来自服务端下发的 registry（已按「卡台注册表 ∩ ACC 定价开关」过滤）。
-// 这里原来写死 go/plus/pro_5x/pro_20x，两头都不对：卡台新开的点数档看不到，
-// 卡台/ACC 关掉的档还照样列。
-const planRegistry = ref<any[]>([])
-const planCards = computed(() =>
-  planRegistry.value.map((p: any) => {
-    const minor = p.serviceFeeUsdMinor ?? p.service_fee_usd_minor
-    const fee =
-      minor != null && minor !== ''
-        ? (Number(minor) / 100).toFixed(2)
-        : p.service_fee_usd != null
-          ? Number(p.service_fee_usd).toFixed(2)
-          : '—'
-    // 点数按比索计价，服务费之外还要垫这笔付款
-    const checkout = p.checkout_amount_minor
-      ? `${p.checkout_currency || 'PHP'} ${(Number(p.checkout_amount_minor) / 100).toFixed(2)}`
-      : ''
-    return { key: p.key, label: p.label || p.key, fee, minor, checkout, enabled: true }
-  }),
-)
-const feeSummary = computed(() =>
-  planCards.value.map((p) => `$${p.fee}`).join(' / ') || '—',
-)
-const feeAllZero = computed(() => planCards.value.every((p) => Number(p.fee) === 0))
-const spendableDisplay = computed(() => bal.spendable ?? '—')
-
-function applyPreset(id: string) {
-  form.card_api_base = PRESETS[id] || PRESETS.prod
-}
-function normalizeBase() {
-  form.card_api_base = siteRoot.value
-}
-async function copyText(t: string) {
-  try {
-    await navigator.clipboard.writeText(t)
-    dialog.toast('已复制', 'ok')
-  } catch {
-    dialog.toast('复制失败', 'err')
-  }
-}
-
-async function loadNetwork() {
-  loadingNet.value = true
-  try {
-    const r = await authFetch('/api/v1/admin/network/egress')
-    const d = await r.json().catch(() => ({}))
-    egressIp.value = d.egress_ip || ''
-  } finally {
-    loadingNet.value = false
-  }
-}
-
-async function loadSettings() {
-  const r = await authFetch('/api/v1/admin/settings')
-  if (!r.ok) return
+const accounts = ref<CardAccount[]>([])
+const balances = reactive<Record<number, { spendable?: string; total?: string; reserve?: string; time?: string; error?: string; loading?: boolean }>>({})
+const base = ref('https://zovocard.com'), egress = ref(''), error = ref(''), swapPassword = ref('')
+const webhookUrl = `${location.origin}/api/v1/webhooks/cardplatform`, swapUrl = `${location.origin}/partner/swap`
+const refreshing = ref(false), checkingNetwork = ref(false), savingSettings = ref(false), swapConfigured = ref(false)
+const showEditor = ref(false), saving = ref(false), keyLocked = ref(false), secretConfigured = ref(false), formError = ref('')
+const form = reactive({ id: 0, name: '', api_key: '', webhook_secret: '' })
+const controller = new AbortController()
+onUnmounted(() => controller.abort())
+async function request(url: string, init: RequestInit = {}) {
+  const r = await authFetch(url, { ...init, signal: controller.signal })
   const d = await r.json()
-  form.card_api_base = d.card_api_base || PRESETS.prod
-  Object.assign(hints, d)
-  normalizeBase()
+  if (!r.ok) throw new Error(d.error || '请求失败')
+  return d
 }
-
-async function save() {
-  saving.value = true
+async function load() {
+  error.value = ''
   try {
-    normalizeBase()
-    const body: Record<string, string> = { card_api_base: form.card_api_base.trim() }
-    if (secrets.card_api_key.trim()) body.card_api_key = secrets.card_api_key.trim()
-    if (secrets.agent_swap_password.trim()) body.agent_swap_password = secrets.agent_swap_password.trim()
-    const r = await authFetch('/api/v1/admin/settings', { method: 'PUT', body: JSON.stringify(body) })
-    const d = await r.json().catch(() => ({}))
-    if (!r.ok) {
-      dialog.toast(d.error || '保存失败', 'err')
-      return false
+    const d = await request('/api/v1/admin/cardplatform/accounts'); accounts.value = d.accounts || []; base.value = d.site_base
+    const settings = await request('/api/v1/admin/settings'); swapConfigured.value = !!settings.agent_swap_password_configured
+  } catch (e: any) { error.value = e.message }
+}
+function edit(a?: CardAccount) {
+  Object.assign(form, { id: a?.id || 0, name: a?.name || '', api_key: '', webhook_secret: '' })
+  keyLocked.value = !!a?.api_key_configured; secretConfigured.value = !!a?.webhook_secret_configured
+  formError.value = ''; showEditor.value = true
+}
+async function saveAccount() {
+  saving.value = true; formError.value = ''
+  try {
+    const saved = await request(`/api/v1/admin/cardplatform/accounts${form.id ? `/${form.id}` : ''}`, { method: form.id ? 'PUT' : 'POST', body: JSON.stringify(form) })
+    showEditor.value = false; form.api_key = ''; form.webhook_secret = ''
+    await load()
+    const account = accounts.value.find(a => a.id === saved.id)
+    if (account) void refreshBalance(account)
+    dialog.toast(saved.rules_synced ? '账号已保存，共用选卡规则已同步' : `账号已保存，但规则同步失败：${saved.rules_error}。请到选卡配置重新同步。`, saved.rules_synced ? 'ok' : 'warn')
+  } catch (e: any) { formError.value = e.message }
+  finally { saving.value = false }
+}
+async function refreshBalance(a: CardAccount) {
+  if (balances[a.id]?.loading) return
+  balances[a.id] = { ...balances[a.id], loading: true }
+  try {
+    const d = await request('/api/v1/admin/cardplatform/balance', { headers: { 'X-Card-Account-ID': String(a.id) } })
+    balances[a.id] = { spendable: d.spendable_balance == null ? undefined : String(d.spendable_balance), total: d.balance == null ? undefined : String(d.balance), reserve: d.account_reserve_amount == null ? undefined : String(d.account_reserve_amount), time: new Date().toLocaleString() }
+  } catch (e: any) { balances[a.id] = { ...balances[a.id], error: e.message } }
+  finally { balances[a.id].loading = false }
+}
+async function refreshAll() {
+  refreshing.value = true
+  try {
+    for (let i = 0; i < accounts.value.length; i += 3) {
+      if (controller.signal.aborted) break
+      await Promise.allSettled(accounts.value.slice(i, i + 3).map(refreshBalance))
     }
-    Object.assign(hints, d)
-    secrets.card_api_key = ''
-    secrets.agent_swap_password = ''
-    dialog.toast('已保存', 'ok')
-    return true
-  } finally {
-    saving.value = false
   }
+  finally { refreshing.value = false }
 }
-
-async function ping() {
-  pinging.value = true
+async function loadNetwork() {
+  checkingNetwork.value = true
+  try { const d = await request('/api/v1/admin/network/egress'); egress.value = d.egress_ip || '' }
+  catch (e: any) { error.value = e.message }
+  finally { checkingNetwork.value = false }
+}
+async function saveSettings() {
+  savingSettings.value = true
   try {
-    const r = await authFetch('/api/v1/admin/cardplatform/ping')
-    const d = await r.json().catch(() => ({}))
-    pingOk.value = !!r.ok && !!d.ok
-    pingMsg.value = d.message || d.error || ''
-    if (d.egress_ip) egressIp.value = d.egress_ip
-    pingTiles.value = {
-      site: d.site_base || siteRoot.value,
-      openapi: d.openapi_base || resolvedOpenapi.value,
-      cdk: d.public_cdk_base || resolvedCdk.value,
-      probed: d.probed || '—',
-      http: String(d.status ?? '—'),
-      egress: d.egress_ip || egressIp.value || '—',
-    }
-    if (d.status === 403) dialog.toast('403：请将出口 IP 加入白名单', 'warn')
-    else if (pingOk.value) dialog.toast('连通正常', 'ok')
-    else dialog.toast(pingMsg.value || '探测失败', 'err')
-  } finally {
-    pinging.value = false
-  }
+    await request('/api/v1/admin/settings', { method: 'PUT', body: JSON.stringify({ card_api_base: base.value, agent_swap_password: swapPassword.value }) })
+    swapPassword.value = ''; await load(); dialog.toast('共用设置已保存', 'ok')
+  } catch (e: any) { error.value = e.message }
+  finally { savingSettings.value = false }
 }
-
-async function loadPlans() {
-  loadingPlans.value = true
-  try {
-    const r = await authFetch('/api/v1/admin/cardplatform/plans')
-    const d = await r.json().catch(() => ({}))
-    if (!r.ok) {
-      dialog.toast(d.error || d.msg || '价格拉取失败', 'err')
-      return
-    }
-    plansRaw.value = d.plans || {}
-    planRegistry.value = d.registry || []
-    plansVersion.value = d.version ?? null
-    dialog.toast('价格已更新', 'ok')
-    dlgPlans.value = true
-  } finally {
-    loadingPlans.value = false
-  }
-}
-
-async function loadBalance() {
-  loadingBal.value = true
-  try {
-    const r = await authFetch('/api/v1/admin/cardplatform/balance')
-    const d = await r.json().catch(() => ({}))
-    if (!r.ok) {
-      dialog.toast(d.error || d.msg || '余额失败', 'err')
-      return
-    }
-    bal.spendable = String(d.spendable_balance ?? '—')
-    bal.balance = String(d.balance ?? '—')
-    bal.reserve = String(d.account_reserve_amount ?? '—')
-    dialog.toast('余额已刷新', 'ok')
-    dlgBal.value = true
-  } finally {
-    loadingBal.value = false
-  }
-}
-
-async function runAllChecks() {
-  busy.value = true
-  try {
-    await save()
-    await ping()
-    await loadBalance()
-    await loadPlans()
-    dlgStatus.value = true
-  } finally {
-    busy.value = false
-  }
-}
-
-function openStatusDialog() {
-  dlgStatus.value = true
-  if (pingOk.value === null) ping()
-}
-function openBalanceDialog() {
-  dlgBal.value = true
-  if (bal.spendable == null) loadBalance()
-}
-function openPlansDialog() {
-  dlgPlans.value = true
-  if (!Object.keys(plansRaw.value).length) loadPlans()
-}
-
-onMounted(async () => {
-  await loadSettings()
-  await loadNetwork()
-})
+async function copy(text: string) { try { await navigator.clipboard.writeText(text); dialog.toast('已复制', 'ok') } catch { dialog.toast('复制失败', 'err') } }
+onMounted(async () => { await load(); void refreshAll() })
 </script>
-
-<style scoped>
-.egress-hero {
-  background: linear-gradient(120deg, var(--primary-soft), transparent 55%);
-  border-color: var(--brd-2);
-}
-.path-chips { display: flex; flex-direction: column; gap: 8px; }
-.path-chip {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
-  padding: 10px 12px; border-radius: var(--radius-md);
-  background: var(--surface-2); border: 1px solid var(--brd);
-}
-.path-chip .k {
-  font-size: 11px; font-weight: 600; color: var(--ink-3);
-  text-transform: uppercase; letter-spacing: .04em; min-width: 72px;
-}
-.path-chip .v { font-size: 12px; color: var(--ink); word-break: break-all; }
-
-.status-card {
-  text-align: left;
-  padding: 16px;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--brd);
-  background: var(--surface);
-  cursor: pointer;
-  transition: .18s ease;
-}
-.status-card:hover {
-  border-color: var(--primary);
-  box-shadow: var(--shadow-sm);
-  transform: translateY(-2px);
-}
-.sc-label { font-size: 12px; color: var(--ink-3); }
-.sc-value { margin-top: 6px; font-size: 20px; font-weight: 700; color: var(--ink); }
-.sc-value.ok { color: var(--good); }
-.sc-value.bad { color: var(--err); }
-.sc-hint { margin-top: 6px; font-size: 11px; color: var(--ink-3); }
-.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-</style>

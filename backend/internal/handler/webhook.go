@@ -6,11 +6,11 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tuzi/cdk-recharge-system/internal/db"
@@ -21,92 +21,111 @@ import (
 // 验签：X-Signature = hex(HMAC-SHA256(webhook_secret, raw body))
 // 文档：zovocard-openapi-zh.md §7
 func CardPlatformWebhook(c *gin.Context) {
-	raw, err := io.ReadAll(io.LimitReader(c.Request.Body, 1<<20))
+	raw, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20))
 	if err != nil {
-		c.Status(http.StatusBadRequest)
+		c.Status(http.StatusRequestEntityTooLarge)
 		return
 	}
-	secret, _ := db.GetSetting("webhook_secret")
-	secret = strings.TrimSpace(secret)
-	if secret == "" {
-		// 未配置密钥时拒绝，避免裸奔
-		log.Printf("webhook: webhook_secret not configured")
-		c.Status(http.StatusServiceUnavailable)
+	secrets, err := db.WebhookSecrets()
+	if err != nil {
+		c.Status(503)
 		return
 	}
-	got := strings.TrimSpace(c.GetHeader("X-Signature"))
-	if got == "" {
-		c.Status(http.StatusUnauthorized)
+	got, err := hex.DecodeString(strings.TrimSpace(c.GetHeader("X-Signature")))
+	if err != nil || len(got) != sha256.Size {
+		c.Status(401)
 		return
 	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	_, _ = mac.Write(raw)
-	expect := hex.EncodeToString(mac.Sum(nil))
-	if subtle.ConstantTimeCompare([]byte(strings.ToLower(got)), []byte(strings.ToLower(expect))) != 1 {
-		c.Status(http.StatusUnauthorized)
+	var accountID int64
+	matches := 0
+	for secret, id := range secrets {
+		if secret == "" {
+			continue
+		}
+		mac := hmac.New(sha256.New, []byte(secret))
+		_, _ = mac.Write(raw)
+		if subtle.ConstantTimeCompare(got, mac.Sum(nil)) == 1 {
+			accountID = id
+			matches++
+		}
+	}
+	if matches != 1 {
+		c.Status(401)
 		return
 	}
-
-	// 尽快 200；入库 best-effort
 	var payload map[string]interface{}
-	_ = json.Unmarshal(raw, &payload)
-
-	eventType := ""
-	if v, ok := payload["event"].(string); ok {
-		eventType = v
+	if json.Unmarshal(raw, &payload) != nil || payload == nil {
+		c.Status(400)
+		return
 	}
-	if v, ok := payload["type"].(string); ok && eventType == "" {
-		eventType = v
+	eventType := strAny(payload["event"])
+	if eventType == "" {
+		eventType = strAny(payload["type"])
 	}
-	// 幂等键
-	idem := webhookIdemKey(payload, eventType)
-	if err := db.InsertWebhookEvent(eventType, idem, string(raw)); err != nil {
-		// 唯一冲突视为已处理（幂等）
-		if !strings.Contains(err.Error(), "UNIQUE") && !strings.Contains(err.Error(), "unique") {
-			log.Printf("webhook store: %v", err)
-		}
-	} else {
-		// 若是 GPT 直充完成，可写审计
-		if eventType == "gpt_direct.completed" {
-			db.WriteAudit("webhook", "gpt_direct.completed", idem, c.ClientIP())
-		}
+	if eventType == "" {
+		c.Status(400)
+		return
 	}
-	// 本站 CDK 状态：兑换完成 → consumed（避免列表仍显示「未使用」）
+	idem := fmt.Sprintf("%d|%s", accountID, webhookIdemKey(payload, eventType))
+	// Persist first; failed effects remain pending and upstream retries replay them.
+	_, err = db.DB.Exec(`INSERT INTO webhook_events(account_id,event_type,idem_key,payload) VALUES(?,?,?,?) ON CONFLICT(idem_key) DO NOTHING`, accountID, eventType, idem, string(raw))
+	if err != nil {
+		log.Printf("webhook store: %v", err)
+		c.Status(503)
+		return
+	}
+	var processed bool
+	var storedPayload string
+	if err = db.DB.QueryRow(`SELECT processed_at IS NOT NULL,payload FROM webhook_events WHERE idem_key=?`, idem).Scan(&processed, &storedPayload); err != nil {
+		c.Status(503)
+		return
+	}
+	// Replays must use the payload that was durably accepted first. A reused
+	// event ID cannot substitute a different CDK/order after a failed attempt.
+	payload = nil
+	if json.Unmarshal([]byte(storedPayload), &payload) != nil {
+		c.Status(503)
+		return
+	}
+	if processed {
+		c.Status(200)
+		return
+	}
 	if strings.HasPrefix(strings.ToLower(eventType), "gpt_direct.") {
-		applyCDKStatusFromWebhook(payload, eventType)
+		if err = applyCDKStatusFromWebhook(accountID, payload, eventType); err == nil {
+			err = observeFromWebhookPayload(accountID, payload)
+		}
+		if err != nil {
+			log.Printf("webhook effects account=%d: %v", accountID, err)
+			c.Status(503)
+			return
+		}
 	}
-	// 卡健康：失败/成功终态观察（同卡多邮箱失败 → 拉黑）
-	if strings.HasPrefix(strings.ToLower(eventType), "gpt_direct.") {
-		observeFromWebhookPayload(payload)
+	if _, err = db.DB.Exec(`UPDATE webhook_events SET processed_at=CURRENT_TIMESTAMP WHERE idem_key=?`, idem); err != nil {
+		c.Status(503)
+		return
 	}
-	c.Status(http.StatusOK)
+	c.Status(200)
 }
 
-// applyCDKStatusFromWebhook 根据卡台终态回写本站 SQLite 中的 CDK status。
-func applyCDKStatusFromWebhook(payload map[string]interface{}, eventType string) {
-	if payload == nil {
-		return
-	}
+func applyCDKStatusFromWebhook(accountID int64, payload map[string]interface{}, eventType string) error {
 	cdkID := anyToInt64(payload["cdk_id"])
 	if cdkID <= 0 {
-		return
+		return nil
 	}
-	et := strings.ToLower(strings.TrimSpace(eventType))
 	st := strings.ToLower(strings.TrimSpace(strAny(payload["cdk_status"])))
-	if st == "" {
-		if strings.Contains(et, "completed") {
-			st = "consumed"
-		} else {
-			return
-		}
+	if st == "" && strings.Contains(strings.ToLower(eventType), "completed") {
+		st = "consumed"
 	}
-	// 失败回传 unused 时，勿把已 consumed/disabled 降级回去
-	if st == "unused" || st == "reserved" {
-		if cur := db.GetCardplatformCDKStatus(cdkID); cur == "consumed" || cur == "disabled" {
-			return
-		}
+	switch st {
+	case "unused", "reserved", "consumed", "disabled", "frozen":
+	default:
+		return nil
 	}
-	_ = db.UpdateCardplatformCDKStatus(cdkID, st)
+	// A delayed reservation/failure must never undo a terminal status. Predicate
+	// and update are one SQLite operation, including under concurrent callbacks.
+	_, err := db.DB.Exec(`UPDATE cardplatform_cdk_codes SET status=? WHERE account_id=? AND upstream_id=? AND NOT (? IN ('unused','reserved') AND status IN ('consumed','disabled'))`, st, accountID, cdkID, st)
+	return err
 }
 
 func webhookIdemKey(p map[string]interface{}, eventType string) string {
@@ -121,10 +140,19 @@ func webhookIdemKey(p map[string]interface{}, eventType string) string {
 		}
 		return ""
 	}
+	if id := str("event_id"); id != "" {
+		return eventType + "|event|" + id
+	}
 	switch eventType {
 	case "card_transaction":
+		if str("auth_id") == "" {
+			break
+		}
 		return strings.Join([]string{eventType, str("auth_id"), str("type"), str("status")}, "|")
 	case "card_operation":
+		if str("operation_id") == "" {
+			break
+		}
 		return strings.Join([]string{eventType, str("operation"), str("operation_id"), str("status")}, "|")
 	case "gpt_direct.completed":
 		if id := str("order_id"); id != "" {
@@ -135,7 +163,8 @@ func webhookIdemKey(p map[string]interface{}, eventType string) string {
 		}
 	}
 	// fallback
-	h := sha256.Sum256([]byte(str("auth_id") + str("order_id") + str("operation_id") + eventType + time.Now().UTC().Format(time.RFC3339Nano)))
+	canonical, _ := json.Marshal(p)
+	h := sha256.Sum256(canonical)
 	return hex.EncodeToString(h[:16])
 }
 
@@ -157,6 +186,7 @@ func AdminListWebhooks(c *gin.Context) {
 	for _, r := range rows {
 		out = append(out, gin.H{
 			"id":         r.ID,
+			"account_id": r.AccountID,
 			"event_type": r.EventType,
 			"idem_key":   r.IdemKey,
 			"created_at": r.CreatedAt,
@@ -176,12 +206,9 @@ func AdminListWebhooks(c *gin.Context) {
 		}
 		urlHint = scheme + "://" + host + "/api/v1/webhooks/cardplatform"
 	}
-	sec, _ := db.GetSetting("webhook_secret")
 	c.JSON(http.StatusOK, gin.H{
-		"events":                out,
-		"webhook_url":           urlHint,
-		"webhook_secret_set":    strings.TrimSpace(sec) != "",
-		"webhook_secret_hint":   maskSecret(sec),
+		"events":      out,
+		"webhook_url": urlHint,
 	})
 }
 
